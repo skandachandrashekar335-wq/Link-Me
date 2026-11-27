@@ -1,0 +1,1 @@
+-keep class com.linkme.androidbridge.core.protocol.** { *; }

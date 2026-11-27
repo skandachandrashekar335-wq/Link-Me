@@ -21,7 +21,8 @@ data class TrustedPeer(
     val deviceId: String,
     val deviceName: String,
     val pinnedCertSha256: String,
-    val sharedBleSecret: ByteArray
+    val sharedBleSecret: ByteArray,
+    val bluetoothSessionKey: ByteArray = deriveFallbackSessionKey(sharedBleSecret)
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -29,7 +30,8 @@ data class TrustedPeer(
         return deviceId == other.deviceId &&
             deviceName == other.deviceName &&
             pinnedCertSha256 == other.pinnedCertSha256 &&
-            sharedBleSecret.contentEquals(other.sharedBleSecret)
+            sharedBleSecret.contentEquals(other.sharedBleSecret) &&
+            bluetoothSessionKey.contentEquals(other.bluetoothSessionKey)
     }
 
     override fun hashCode(): Int {
@@ -37,7 +39,17 @@ data class TrustedPeer(
         result = 31 * result + deviceName.hashCode()
         result = 31 * result + pinnedCertSha256.hashCode()
         result = 31 * result + sharedBleSecret.contentHashCode()
+        result = 31 * result + bluetoothSessionKey.contentHashCode()
         return result
+    }
+
+    companion object {
+        fun deriveFallbackSessionKey(sharedBleSecret: ByteArray): ByteArray {
+            val digest = MessageDigest.getInstance("SHA-256")
+            digest.update(sharedBleSecret)
+            digest.update("LinkMe-BT-Session-v1".encodeToByteArray())
+            return digest.digest()
+        }
     }
 }
 
@@ -46,7 +58,8 @@ private data class PersistedPeerRecord(
     val deviceId: String,
     val deviceName: String,
     val pinnedCertSha256: String,
-    val sharedBleSecretBase64: String
+    val sharedBleSecretBase64: String,
+    val bluetoothSessionKeyBase64: String? = null
 )
 
 interface TrustPersistenceBackend {
@@ -190,7 +203,8 @@ class TrustStore(
                 deviceId = it.deviceId,
                 deviceName = it.deviceName,
                 pinnedCertSha256 = it.pinnedCertSha256,
-                sharedBleSecretBase64 = Base64.getEncoder().encodeToString(it.sharedBleSecret)
+                sharedBleSecretBase64 = Base64.getEncoder().encodeToString(it.sharedBleSecret),
+                bluetoothSessionKeyBase64 = Base64.getEncoder().encodeToString(it.bluetoothSessionKey)
             )
         }
         val payload = json.encodeToString(records).encodeToByteArray()
@@ -208,12 +222,16 @@ class TrustStore(
         }.getOrNull() ?: return
         for (record in records) {
             val secret = Base64.getDecoder().decode(record.sharedBleSecretBase64)
+            val btKey = record.bluetoothSessionKeyBase64?.let {
+                runCatching { Base64.getDecoder().decode(it) }.getOrNull()
+            }?.takeIf { it.size == 32 } ?: TrustedPeer.deriveFallbackSessionKey(secret)
             if (secret.size == 32 && record.pinnedCertSha256.length == 64) {
                 peers[record.deviceId] = TrustedPeer(
                     deviceId = record.deviceId,
                     deviceName = record.deviceName,
                     pinnedCertSha256 = record.pinnedCertSha256.lowercase(),
-                    sharedBleSecret = secret
+                    sharedBleSecret = secret,
+                    bluetoothSessionKey = btKey
                 )
             }
         }

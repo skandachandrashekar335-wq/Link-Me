@@ -2,6 +2,7 @@ import Foundation
 import Observation
 
 public enum BridgeAccentTheme: String, Codable, CaseIterable, Sendable {
+    case liquidBlue
     case crimson
     case mint
     case amber
@@ -9,6 +10,7 @@ public enum BridgeAccentTheme: String, Codable, CaseIterable, Sendable {
 
     public var displayName: String {
         switch self {
+        case .liquidBlue: return "Electric Blue"
         case .crimson: return "Crimson"
         case .mint: return "Mint"
         case .amber: return "Amber"
@@ -73,6 +75,23 @@ public struct BridgePaletteSpec: Sendable, Equatable {
 
     public static func forTheme(_ theme: BridgeAccentTheme) -> BridgePaletteSpec {
         switch theme {
+        case .liquidBlue:
+            return BridgePaletteSpec(
+                surfaceLowest: BridgeRgba(hex: 0x0D0E11),
+                surface: BridgeRgba(hex: 0x101114),
+                surfaceLow: BridgeRgba(hex: 0x17191D),
+                surfaceContainer: BridgeRgba(hex: 0x202329),
+                surfaceHigh: BridgeRgba(hex: 0x292A2D),
+                surfaceHighest: BridgeRgba(hex: 0x343538),
+                primaryAccent: BridgeRgba(hex: 0x0A84FF),
+                secondaryAccent: BridgeRgba(hex: 0x30D158),
+                activeCardLight: BridgeRgba(hex: 0xAAC7FF),
+                activeCardInk: BridgeRgba(hex: 0x001B3E),
+                outlineVariant: BridgeRgba(hex: 0xFFFFFF, alpha: 0.10),
+                onSurface: BridgeRgba(hex: 0xF5F5F7),
+                secondaryText: BridgeRgba(hex: 0xA1A1AA),
+                isLight: false
+            )
         case .crimson:
             return BridgePaletteSpec(
                 surfaceLowest: BridgeRgba(hex: 0x0D0E10),
@@ -228,7 +247,7 @@ public final class BridgePreferences {
            let parsedTheme = BridgeAccentTheme(rawValue: rawTheme) {
             self.accentTheme = parsedTheme
         } else {
-            self.accentTheme = .crimson
+            self.accentTheme = .liquidBlue
         }
 
         self.compactMode = defaults.object(forKey: keyPrefix + "compactMode") as? Bool ?? false

@@ -27,14 +27,14 @@ struct MacBridgeApp: App {
                     }
                 }
         } label: {
-            Image(nsImage: MenuBarVectorIcon.makeTemplateImage(isActive: viewModel.bridgeState == .activeWifiStream))
+            Image(nsImage: MenuBarVectorIcon.makeTemplateImage(isActive: viewModel.isBluetoothConnected || viewModel.bridgeState == .activeWifiStream))
         }
         .menuBarExtraStyle(.window)
 
         Window("Link-Me Studio", id: "studio") {
             BridgeStudioWindow(viewModel: viewModel)
         }
-        .defaultSize(width: 680, height: 560)
+        .defaultSize(width: 1040, height: 700)
     }
 }
 
@@ -62,21 +62,25 @@ enum MenuBarVectorIcon {
 
 enum StudioTab: String, CaseIterable {
     case bridge = "Bridge"
+    case pairing = "Secure Pairing"
     case activity = "Activity"
     case customize = "Customize"
+    case diagnostics = "Diagnostics"
 }
 
 enum ActivityFilter: String, CaseIterable {
     case all = "All"
     case files = "Files"
     case clipboard = "Clipboard"
-    case transport = "Transport"
+    case media = "Media"
+    case system = "System"
 }
 
 enum ActivityCategory: String {
-    case files = "FILES"
-    case clipboard = "CLIPBOARD"
-    case transport = "TRANSPORT"
+    case files = "Files"
+    case clipboard = "Clipboard"
+    case media = "Media"
+    case system = "System"
 }
 
 struct BridgeActivityRecord: Identifiable {
@@ -84,6 +88,7 @@ struct BridgeActivityRecord: Identifiable {
     let category: ActivityCategory
     let title: String
     let detail: String
+    let badgeText: String
     let timestamp: Date
     let clipboardText: String?
     let fileURL: URL?
@@ -92,6 +97,7 @@ struct BridgeActivityRecord: Identifiable {
         category: ActivityCategory,
         title: String,
         detail: String,
+        badgeText: String = "OK",
         timestamp: Date = Date(),
         clipboardText: String? = nil,
         fileURL: URL? = nil
@@ -99,6 +105,7 @@ struct BridgeActivityRecord: Identifiable {
         self.category = category
         self.title = title
         self.detail = detail
+        self.badgeText = badgeText
         self.timestamp = timestamp
         self.clipboardText = clipboardText
         self.fileURL = fileURL
@@ -114,11 +121,15 @@ struct PendingIncomingOffer: Identifiable {
 final class BridgeDashboardViewModel: ObservableObject {
     @Published var selectedTab: StudioTab = .bridge
     @Published var activityFilter: ActivityFilter = .all
+    @Published var activitySearchQuery: String = ""
     @Published var bridgeState: BridgeState = .dormantBle
     @Published var peerName: String = "No Device Paired"
+    @Published var peerDeviceId: String = ""
+    @Published var peerCertFingerprint: String = ""
     @Published var peerBatteryPercent: Int = 84
     @Published var peerIsCharging: Bool = true
     @Published var peerPaired: Bool = false
+    @Published var isBluetoothConnected: Bool = false
     @Published var latencyMs: Int?
     @Published var clipboardSyncEnabled: Bool = true
     @Published var notificationMirrorEnabled: Bool = true
@@ -126,7 +137,7 @@ final class BridgeDashboardViewModel: ObservableObject {
     @Published var pendingIncomingOffer: PendingIncomingOffer?
     @Published var recentNotifications: [MirroredNotificationItem] = []
     @Published var activityLog: [BridgeActivityRecord] = []
-    @Published var urlDraft: String = ""
+    @Published var urlDraft: String = "https://developer.android.com/studio"
     @Published var isShowingPairingSheet: Bool = false
     @Published var isDropTargeted: Bool = false
     @Published var pairingRemainingSeconds: Int = 300
@@ -134,6 +145,12 @@ final class BridgeDashboardViewModel: ObservableObject {
     @Published var pairingExpiresAt: Date = Date().addingTimeInterval(300)
     @Published var pendingApproval: PendingPairingApproval?
     @Published var statusBanner: String?
+
+    // Diagnostics & real hardware state
+    @Published var peripheralDiagnostics = BlePeripheralDiagnostics()
+    @Published var localCertFingerprint: String = ""
+    @Published var localListeningPort: UInt16 = 49152
+    @Published var loopbackDiagnosticsResult: String?
 
     let preferences = BridgePreferences()
     let transportManager = TransportManager()
@@ -152,6 +169,7 @@ final class BridgeDashboardViewModel: ObservableObject {
     private var localDeviceId: String = "11111111-1111-4111-8111-111111111111"
     private var localIdentity: DeviceIdentity?
     private var bleCentralManager: BleCentralManager?
+    private var blePeripheralManager: BlePeripheralManager?
     private var wifiTlsServer: WifiTlsServer?
     private var wifiTlsClient: WifiTlsClient?
     private var activeTransferId: UUID?
@@ -166,15 +184,18 @@ final class BridgeDashboardViewModel: ObservableObject {
     }
 
     var filteredActivities: [BridgeActivityRecord] {
+        let byCategory: [BridgeActivityRecord]
         switch activityFilter {
-        case .all:
-            return activityLog
-        case .files:
-            return activityLog.filter { $0.category == .files }
-        case .clipboard:
-            return activityLog.filter { $0.category == .clipboard }
-        case .transport:
-            return activityLog.filter { $0.category == .transport }
+        case .all: byCategory = activityLog
+        case .files: byCategory = activityLog.filter { $0.category == .files }
+        case .clipboard: byCategory = activityLog.filter { $0.category == .clipboard }
+        case .media: byCategory = activityLog.filter { $0.category == .media }
+        case .system: byCategory = activityLog.filter { $0.category == .system }
+        }
+        let q = activitySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return byCategory }
+        return byCategory.filter {
+            $0.title.lowercased().contains(q) || $0.detail.lowercased().contains(q)
         }
     }
 
@@ -185,6 +206,7 @@ final class BridgeDashboardViewModel: ObservableObject {
         if let identity = try? identityManager.loadOrCreateIdentity() {
             localIdentity = identity
             localDeviceId = identity.deviceId
+            localCertFingerprint = identity.certificateSha256Hex
         }
 
         preferences.onPreferencesChanged = { [weak self] snapshot in
@@ -201,16 +223,29 @@ final class BridgeDashboardViewModel: ObservableObject {
                 guard let self else { return }
                 self.peerPaired = true
                 self.peerName = peer.deviceName
-                self.latencyMs = 14
-                self.statusBanner = "BLE linked: \(peer.deviceName)"
+                self.peerDeviceId = peer.deviceId
+                self.peerCertFingerprint = peer.pinnedCertSha256
+                self.statusBanner = "Bluetooth E2EE linked: \(peer.deviceName)"
                 self.appendActivity(
                     BridgeActivityRecord(
-                        category: .transport,
-                        title: "BLE Peer Verified",
-                        detail: peer.deviceName
+                        category: .system,
+                        title: "Bluetooth Peer Connected",
+                        detail: peer.deviceName,
+                        badgeText: "BLE E2EE"
                     )
                 )
                 await self.clipboardManager.setPeerReachable(true)
+            }
+        }
+        central.onConnectionStateChanged = { [weak self] connected in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isBluetoothConnected = connected || (self.peripheralDiagnostics.subscribedCentralsCount > 0)
+            }
+        }
+        central.onLatencyMeasured = { [weak self] rtt in
+            Task { @MainActor in
+                self?.latencyMs = rtt
             }
         }
         central.onInboundFrame = { [weak self] frame in
@@ -218,9 +253,25 @@ final class BridgeDashboardViewModel: ObservableObject {
         }
         bleCentralManager = central
 
+        let peripheral = BlePeripheralManager(trustStore: trustStore)
+        peripheral.onDiagnosticsChanged = { [weak self] diag in
+            Task { @MainActor in
+                guard let self else { return }
+                self.peripheralDiagnostics = diag
+                self.isBluetoothConnected = (diag.subscribedCentralsCount > 0) || (self.bleCentralManager?.isConnected == true)
+            }
+        }
+        peripheral.onInboundFrame = { [weak self] frame in
+            Task { await self?.handleInboundFrame(frame) }
+        }
+        blePeripheralManager = peripheral
+        peripheral.start(localName: preferences.normalizedAlias)
+
         if let firstPeer = (try? trustStore.allPeers())?.first {
             peerPaired = true
             peerName = firstPeer.deviceName
+            peerDeviceId = firstPeer.deviceId
+            peerCertFingerprint = firstPeer.pinnedCertSha256
             central.startScanning()
         } else {
             peerPaired = false
@@ -234,9 +285,27 @@ final class BridgeDashboardViewModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             await self.applyPreferencesSnapshot(self.preferences.snapshot)
+            try? await self.pairingFeature.startTemporaryListener(
+                onReadyPort: { [weak self] port in
+                    Task { @MainActor in
+                        self?.localListeningPort = port
+                    }
+                },
+                onPairHelloReceived: { [weak self] hello in
+                    Task { @MainActor [weak self] in
+                        await self?.processIncomingPairHello(hello)
+                    }
+                }
+            )
+            await self.refreshPairingSession()
+
             await self.transportManager.configureTransportHooks(
-                bleSender: { frame in
-                    central.sendControlFrame(frame)
+                bleSender: { [weak central, weak peripheral] frame in
+                    if central?.isConnected == true {
+                        central?.sendControlFrame(frame)
+                    } else {
+                        peripheral?.sendFrame(frame)
+                    }
                 },
                 wifiOpener: { [weak self] in
                     guard let self else { return 49152 }
@@ -261,13 +330,14 @@ final class BridgeDashboardViewModel: ObservableObject {
 
     func appendActivity(_ record: BridgeActivityRecord) {
         activityLog.insert(record, at: 0)
-        if activityLog.count > 60 {
-            activityLog.removeLast(activityLog.count - 60)
+        if activityLog.count > 80 {
+            activityLog.removeLast(activityLog.count - 80)
         }
     }
 
     func teardownOnQuit() {
         bleCentralManager?.stopScanning()
+        blePeripheralManager?.stop()
         wifiTlsClient?.close()
         wifiTlsClient = nil
         wifiTlsServer?.stop()
@@ -293,16 +363,19 @@ final class BridgeDashboardViewModel: ObservableObject {
         wifiTlsServer = server
         appendActivity(
             BridgeActivityRecord(
-                category: .transport,
+                category: .system,
                 title: "Wi-Fi mTLS 1.3 Active",
-                detail: "Cooldown \(preferences.wifiCooldownSeconds)s"
+                detail: "Cooldown \(preferences.wifiCooldownSeconds)s",
+                badgeText: "TLS 1.3"
             )
         )
         return try await server.start(port: 0, advertiseBonjour: true)
     }
 
     private func sendOverWifi(_ frame: WireFrame) async throws {
-        guard let client = wifiTlsClient else { return }
+        guard let client = wifiTlsClient else {
+            throw WifiTlsError.connectionClosed
+        }
         try await client.send(frame: frame)
     }
 
@@ -314,15 +387,52 @@ final class BridgeDashboardViewModel: ObservableObject {
         bridgeState = .dormantBle
         appendActivity(
             BridgeActivityRecord(
-                category: .transport,
-                title: "Returned to BLE Standby",
-                detail: "Wi-Fi cooldown expired"
+                category: .system,
+                title: "Returned to Bluetooth E2EE Standby",
+                detail: "Wi-Fi cooldown expired",
+                badgeText: "BLE E2EE"
             )
         )
     }
 
+    private func processIncomingPairHello(_ hello: PairHelloPayload) async {
+        if let approval = try? await pairingFeature.handleIncomingPairHello(hello) {
+            pendingApproval = approval
+            statusBanner = "Verify 6-digit SAS: \(approval.sasCode)"
+            appendActivity(
+                BridgeActivityRecord(
+                    category: .system,
+                    title: "Pairing Request Received",
+                    detail: "\(hello.deviceName) • SAS \(approval.sasCode)",
+                    badgeText: "SAS Ready"
+                )
+            )
+        }
+    }
+
     private func handleInboundFrame(_ frame: WireFrame) async {
         switch frame.messageType {
+        case .pairHello:
+            if let hello = try? JSONDecoder().decode(PairHelloPayload.self, from: frame.payload) {
+                await processIncomingPairHello(hello)
+            }
+
+        case .wakeWifi:
+            if let wake = try? JSONDecoder().decode(WakeWifiPayload.self, from: frame.payload),
+               let identity = localIdentity,
+               let peer = (try? trustStore.allPeers())?.first,
+               let hostHint = wake.hostHints.first(where: { !$0.hasSuffix(".local.") }) {
+                let client = WifiTlsClient(
+                    identity: identity,
+                    expectedPeerDeviceId: peer.deviceId,
+                    trustStore: trustStore
+                )
+                if (try? await client.connect(host: hostHint, port: wake.servicePort)) != nil {
+                    wifiTlsClient = client
+                    bridgeState = .activeWifiStream
+                }
+            }
+
         case .clipboardSync:
             if let payload = try? JSONDecoder().decode(ClipboardSyncPayload.self, from: frame.payload) {
                 try? await clipboardManager.applyRemoteClipboard(payload)
@@ -330,8 +440,9 @@ final class BridgeDashboardViewModel: ObservableObject {
                     appendActivity(
                         BridgeActivityRecord(
                             category: .clipboard,
-                            title: "Clipboard From Android",
+                            title: "Clipboard Synchronized",
                             detail: String(snippet.prefix(120)),
+                            badgeText: "Synced",
                             clipboardText: snippet
                         )
                     )
@@ -346,7 +457,8 @@ final class BridgeDashboardViewModel: ObservableObject {
                         BridgeActivityRecord(
                             category: .files,
                             title: "File Offer Pending",
-                            detail: "\(offer.filename) (\(offer.byteSize / 1024) KB)"
+                            detail: "\(offer.filename) (\(offer.byteSize / 1024) KB)",
+                            badgeText: "Pending"
                         )
                     )
                 } else {
@@ -365,8 +477,9 @@ final class BridgeDashboardViewModel: ObservableObject {
                     appendActivity(
                         BridgeActivityRecord(
                             category: .files,
-                            title: "Received File",
+                            title: "File Received",
                             detail: progress.filename,
+                            badgeText: "Verified",
                             fileURL: savedURL
                         )
                     )
@@ -377,6 +490,16 @@ final class BridgeDashboardViewModel: ObservableObject {
             if let event = try? JSONDecoder().decode(NotificationEventPayload.self, from: frame.payload) {
                 try? await notificationManager.handleIncomingEvent(event, postSystemBanner: true)
                 recentNotifications = await notificationManager.recentNotifications
+                if event.action == "POST" {
+                    appendActivity(
+                        BridgeActivityRecord(
+                            category: .system,
+                            title: "Notification Mirrored",
+                            detail: "\(event.appName) • \(event.title)",
+                            badgeText: "Alert"
+                        )
+                    )
+                }
             }
 
         case .pingTelemetry:
@@ -387,14 +510,26 @@ final class BridgeDashboardViewModel: ObservableObject {
                 bridgeState = telemetry.transportState
             }
 
+        case .deviceCommand:
+            if let cmd = try? JSONDecoder().decode(DeviceCommandPayload.self, from: frame.payload),
+               cmd.command == "btPing" {
+                let pong = DeviceCommandPayload(command: "btPong", timestampMs: cmd.timestampMs)
+                if let data = try? JSONEncoder().encode(pong),
+                   let pongFrame = try? WireFrame(messageType: .deviceCommand, sequenceId: frame.sequenceId &+ 10_000_000, payload: data) {
+                    blePeripheralManager?.sendFrame(pongFrame)
+                    bleCentralManager?.sendControlFrame(pongFrame)
+                }
+            }
+
         case .mediaControl:
             if let cmd = try? JSONDecoder().decode(MediaControlPayload.self, from: frame.payload) {
                 continuityController.handleInboundMediaControl(cmd)
                 appendActivity(
                     BridgeActivityRecord(
-                        category: .transport,
-                        title: "Remote Media Action",
-                        detail: cmd.action.rawValue.uppercased()
+                        category: .media,
+                        title: "Media Command Executed",
+                        detail: cmd.action.rawValue.uppercased(),
+                        badgeText: cmd.action.rawValue
                     )
                 )
             }
@@ -405,9 +540,10 @@ final class BridgeDashboardViewModel: ObservableObject {
                 statusBanner = "Opened URL from Android"
                 appendActivity(
                     BridgeActivityRecord(
-                        category: .transport,
-                        title: "Opened URL From Android",
-                        detail: opened.absoluteString
+                        category: .clipboard,
+                        title: "URL Opened From Android",
+                        detail: opened.absoluteString,
+                        badgeText: "Opened"
                     )
                 )
             }
@@ -419,13 +555,9 @@ final class BridgeDashboardViewModel: ObservableObject {
 
     private func acceptIncomingFileOffer(_ offer: FileOfferPayload) async {
         if let response = try? await fileTransferManager.beginIncomingTransfer(offer: offer),
-           let data = try? JSONEncoder().encode(response) {
-            try? await transportManager.sendFrame(
-                msgType: .fileResponse,
-                payload: data,
-                priority: .lowLatencyControl,
-                deviceId: localDeviceId
-            )
+           let data = try? JSONEncoder().encode(response),
+           let frame = try? await transportManager.makeFrame(messageType: .fileResponse, payload: data) {
+            try? await transportManager.sendResilientFrame(frame, preferBle: true)
         }
     }
 
@@ -443,19 +575,16 @@ final class BridgeDashboardViewModel: ObservableObject {
                     resumeChunkIndex: 0,
                     reason: "DECLINED_BY_USER"
                 )
-                if let data = try? JSONEncoder().encode(decline) {
-                    try? await transportManager.sendFrame(
-                        msgType: .fileResponse,
-                        payload: data,
-                        priority: .lowLatencyControl,
-                        deviceId: localDeviceId
-                    )
+                if let data = try? JSONEncoder().encode(decline),
+                   let frame = try? await transportManager.makeFrame(messageType: .fileResponse, payload: data) {
+                    try? await transportManager.sendResilientFrame(frame, preferBle: true)
                 }
                 appendActivity(
                     BridgeActivityRecord(
                         category: .files,
                         title: "Declined File Offer",
-                        detail: pending.offer.filename
+                        detail: pending.offer.filename,
+                        badgeText: "Declined"
                     )
                 )
                 statusBanner = "Declined \(pending.offer.filename)"
@@ -482,6 +611,7 @@ final class BridgeDashboardViewModel: ObservableObject {
                         category: .clipboard,
                         title: "Clipboard Sent to Android",
                         detail: String(text.prefix(120)),
+                        badgeText: "Synced",
                         clipboardText: text
                     )
                 )
@@ -506,9 +636,10 @@ final class BridgeDashboardViewModel: ObservableObject {
             try? await continuityController.sendMediaControl(action)
             appendActivity(
                 BridgeActivityRecord(
-                    category: .transport,
+                    category: .media,
                     title: "Media Control Sent",
-                    detail: action.rawValue.uppercased()
+                    detail: action.rawValue.uppercased(),
+                    badgeText: action.rawValue
                 )
             )
             statusBanner = "Media: \(action.rawValue)"
@@ -521,13 +652,13 @@ final class BridgeDashboardViewModel: ObservableObject {
         Task {
             do {
                 let valid = try await continuityController.sendOpenUrl(raw)
-                urlDraft = ""
                 statusBanner = "Sent URL to Android"
                 appendActivity(
                     BridgeActivityRecord(
-                        category: .transport,
+                        category: .clipboard,
                         title: "URL Beamed to Android",
-                        detail: valid.absoluteString
+                        detail: valid.absoluteString,
+                        badgeText: "Opened"
                     )
                 )
             } catch {
@@ -540,6 +671,14 @@ final class BridgeDashboardViewModel: ObservableObject {
         Task {
             _ = try? await telemetryFeature.sendRingPhoneCommand(durationSeconds: 15)
             statusBanner = "Ringing paired phone (15s)"
+            appendActivity(
+                BridgeActivityRecord(
+                    category: .system,
+                    title: "Ring Phone Sent",
+                    detail: "15-second audible alert",
+                    badgeText: "Sent"
+                )
+            )
         }
     }
 
@@ -577,7 +716,7 @@ final class BridgeDashboardViewModel: ObservableObject {
                         }
                     },
                     emitFrame: { frame in
-                        try await self.transportManager.sendFrame(frame, preferBleIfSmall: false)
+                        try await self.transportManager.sendResilientFrame(frame, preferBle: false)
                     }
                 )
                 activeTransfer = nil
@@ -587,19 +726,16 @@ final class BridgeDashboardViewModel: ObservableObject {
                 appendActivity(
                     BridgeActivityRecord(
                         category: .files,
-                        title: "Sent File to Android",
+                        title: "File Transfer Completed",
                         detail: url.lastPathComponent,
+                        badgeText: "Sent",
                         fileURL: url
                     )
                 )
-            } catch TransportError.bleOnlyBatterySaverBlocked {
-                activeTransfer = nil
-                activeTransferId = nil
-                statusBanner = "Blocked: BLE-Only Battery Saver is ON"
             } catch {
                 activeTransfer = nil
                 activeTransferId = nil
-                statusBanner = "Transfer stopped"
+                statusBanner = "Transfer stopped: \(error.localizedDescription)"
             }
         }
     }
@@ -613,16 +749,27 @@ final class BridgeDashboardViewModel: ObservableObject {
         }
     }
 
-    func startPairingFlow() {
+    func refreshPairingSession() async {
+        do {
+            let (uri, expires) = try await pairingFeature.beginPairingSession(
+                tcpPort: localListeningPort,
+                deviceName: preferences.normalizedAlias
+            )
+            pairingUriString = uri.uriString
+            pairingExpiresAt = expires
+            pendingApproval = nil
+        } catch {
+            statusBanner = "Failed to initialize pairing"
+        }
+    }
+
+    func startPairingFlow(inStudioWindow: Bool = false) {
         Task {
-            do {
-                let (uri, expires) = try await pairingFeature.beginPairingSession(tcpPort: 49152)
-                pairingUriString = uri.uriString
-                pairingExpiresAt = expires
-                pendingApproval = nil
+            await refreshPairingSession()
+            if inStudioWindow {
+                selectedTab = .pairing
+            } else {
                 isShowingPairingSheet = true
-            } catch {
-                statusBanner = "Failed to initialize pairing"
             }
         }
     }
@@ -632,13 +779,16 @@ final class BridgeDashboardViewModel: ObservableObject {
             if let peer = try? await pairingFeature.confirmAndTrust() {
                 peerPaired = true
                 peerName = peer.deviceName
+                peerDeviceId = peer.deviceId
+                peerCertFingerprint = peer.pinnedCertSha256
                 bleCentralManager?.startScanning()
                 statusBanner = "Trusted \(peer.deviceName) in Keychain"
                 appendActivity(
                     BridgeActivityRecord(
-                        category: .transport,
+                        category: .system,
                         title: "Device Paired",
-                        detail: peer.deviceName
+                        detail: peer.deviceName,
+                        badgeText: "Verified"
                     )
                 )
             }
@@ -663,14 +813,66 @@ final class BridgeDashboardViewModel: ObservableObject {
         bleCentralManager?.stopScanning()
         peerPaired = false
         peerName = "No Device Paired"
+        peerDeviceId = ""
+        peerCertFingerprint = ""
         latencyMs = nil
         statusBanner = "Unpaired all devices"
         appendActivity(
             BridgeActivityRecord(
-                category: .transport,
+                category: .system,
                 title: "Devices Unpaired",
-                detail: "TrustStore cleared"
+                detail: "TrustStore cleared",
+                badgeText: "Reset"
             )
         )
+    }
+
+    func runLoopbackSelfTest() {
+        Task {
+            let started = Date()
+            do {
+                let mac = PairingCrypto()
+                let android = PairingCrypto()
+                let s1 = try mac.deriveSecrets(peerPublicKeyString: android.publicKeyBase64Url, nonce: mac.nonce)
+                let s2 = try android.deriveSecrets(peerPublicKeyString: mac.publicKeyBase64Url, nonce: mac.nonce)
+                guard s1.sasCode == s2.sasCode, s1.sessionKey == s2.sessionKey else {
+                    loopbackDiagnosticsResult = "FAIL: SAS or session key mismatch"
+                    return
+                }
+                let senderCipher = try BluetoothSessionCipher(sessionKey: s1.sessionKey, senderTag: "MAC0")
+                let receiverCipher = try BluetoothSessionCipher(sessionKey: s2.sessionKey, senderTag: "AND0")
+                let sampleFrame = try WireFrame(
+                    messageType: .mediaControl,
+                    sequenceId: 1,
+                    payload: Data("{\"action\":\"play_pause\"}".utf8)
+                )
+                let sealed = try senderCipher.seal(frame: sampleFrame)
+                let chunks = BluetoothPacketCodec.packetize(envelope: sealed, packetId: 7, mtu: 23)
+                let reassembler = BluetoothPacketReassembler()
+                var assembled: Data?
+                for chunk in chunks {
+                    let res = reassembler.ingest(chunk)
+                    if let done = res.completeEnvelope { assembled = done }
+                }
+                guard let env = assembled,
+                      try receiverCipher.openFrame(from: env) == sampleFrame else {
+                    loopbackDiagnosticsResult = "FAIL: BLE ChaCha20-Poly1305 reassembly failed"
+                    return
+                }
+                let elapsedMs = max(1, Int(Date().timeIntervalSince(started) * 1000))
+                latencyMs = elapsedMs
+                loopbackDiagnosticsResult = "PASS (\(elapsedMs)ms): X25519 SAS \(s1.sasCode) + ChaCha20-Poly1305 (\(chunks.count) BLE MTU-23 chunks) verified"
+                appendActivity(
+                    BridgeActivityRecord(
+                        category: .system,
+                        title: "Loopback Diagnostics Passed",
+                        detail: "X25519 + ChaCha20 BLE E2EE verified in \(elapsedMs)ms",
+                        badgeText: "PASS"
+                    )
+                )
+            } catch {
+                loopbackDiagnosticsResult = "FAIL: \(error.localizedDescription)"
+            }
+        }
     }
 }

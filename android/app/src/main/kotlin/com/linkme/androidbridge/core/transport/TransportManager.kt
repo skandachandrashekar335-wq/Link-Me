@@ -77,7 +77,7 @@ class TransportManager(
         deviceId: String = "22222222-2222-4222-8222-222222222222"
     ) {
         val frame = makeFrame(msgType, payload)
-        routeFrame(frame, priority, deviceId)
+        routeFrame(frame, priority, deviceId, fallbackToBleOnWifiError = false)
     }
 
     override fun sendFrame(frame: WireFrame, preferBleIfSmall: Boolean) {
@@ -86,7 +86,12 @@ class TransportManager(
         } else {
             TransferPriority.HIGH_THROUGHPUT
         }
-        routeFrame(frame, priority, "22222222-2222-4222-8222-222222222222")
+        routeFrame(frame, priority, "22222222-2222-4222-8222-222222222222", fallbackToBleOnWifiError = false)
+    }
+
+    fun sendResilientFrame(frame: WireFrame, preferBle: Boolean = false) {
+        val priority = if (preferBle) TransferPriority.LOW_LATENCY_CONTROL else TransferPriority.HIGH_THROUGHPUT
+        routeFrame(frame, priority, "22222222-2222-4222-8222-222222222222", fallbackToBleOnWifiError = true)
     }
 
     @Synchronized
@@ -112,7 +117,12 @@ class TransportManager(
     }
 
     @Synchronized
-    private fun routeFrame(frame: WireFrame, priority: TransferPriority, deviceId: String) {
+    private fun routeFrame(
+        frame: WireFrame,
+        priority: TransferPriority,
+        deviceId: String,
+        fallbackToBleOnWifiError: Boolean
+    ) {
         if (frame.payload.size <= BLE_THRESHOLD_BYTES && priority == TransferPriority.LOW_LATENCY_CONTROL) {
             bleSender?.invoke(frame)
             outboundSink?.invoke(frame, TransportChannel.BLE_STANDBY)
@@ -120,7 +130,7 @@ class TransportManager(
         }
 
         if (bleOnlyBatterySaver) {
-            if (frame.payload.size <= BLE_THRESHOLD_BYTES) {
+            if (frame.payload.size <= BLE_THRESHOLD_BYTES || fallbackToBleOnWifiError) {
                 bleSender?.invoke(frame)
                 outboundSink?.invoke(frame, TransportChannel.BLE_STANDBY)
                 return
@@ -131,40 +141,48 @@ class TransportManager(
         cooldownFuture?.cancel(false)
         cooldownFuture = null
 
-        if (!isWifiSocketOpen) {
-            transition(BatteryStateEvent.LOCAL_ACTIVITY_TRIGGERED)
-            val port = wifiOpener?.invoke() ?: 49152
-            val wakePayload = WakeWifiPayload(
-                msgType = "WAKE_WIFI",
-                deviceId = deviceId,
-                servicePort = port,
-                hostHints = listOf("_andromac._tcp.local."),
-                bleTokenHex = "0000000000000000",
-                reason = "high_throughput",
-                timestampMs = System.currentTimeMillis()
-            )
-            val wakeFrame = makeFrame(
-                WireMessageType.WAKE_WIFI,
-                Json.encodeToString(wakePayload).toByteArray(Charsets.UTF_8)
-            )
-            bleSender?.invoke(wakeFrame)
-            outboundSink?.invoke(wakeFrame, TransportChannel.BLE_STANDBY)
-
-            transition(BatteryStateEvent.MTLS_HANDSHAKE_SUCCEEDED)
-            isWifiSocketOpen = true
-        } else if (stateMachine.state == BridgeState.COOLDOWN_IDLE) {
-            transition(BatteryStateEvent.LOCAL_ACTIVITY_TRIGGERED)
-        }
-
-        activeStreams.incrementAndGet()
         try {
-            wifiSender?.invoke(frame)
-            outboundSink?.invoke(frame, TransportChannel.WIFI_TURBO)
-        } finally {
-            if (activeStreams.decrementAndGet() <= 0) {
-                activeStreams.set(0)
-                scheduleCooldownIfIdle()
+            if (!isWifiSocketOpen) {
+                transition(BatteryStateEvent.LOCAL_ACTIVITY_TRIGGERED)
+                val port = wifiOpener?.invoke() ?: 49152
+                val wakePayload = WakeWifiPayload(
+                    msgType = "WAKE_WIFI",
+                    deviceId = deviceId,
+                    servicePort = port,
+                    hostHints = listOf("_andromac._tcp.local."),
+                    bleTokenHex = "0000000000000000",
+                    reason = "high_throughput",
+                    timestampMs = System.currentTimeMillis()
+                )
+                val wakeFrame = makeFrame(
+                    WireMessageType.WAKE_WIFI,
+                    Json.encodeToString(wakePayload).toByteArray(Charsets.UTF_8)
+                )
+                bleSender?.invoke(wakeFrame)
+                outboundSink?.invoke(wakeFrame, TransportChannel.BLE_STANDBY)
+
+                transition(BatteryStateEvent.MTLS_HANDSHAKE_SUCCEEDED)
+                isWifiSocketOpen = true
+            } else if (stateMachine.state == BridgeState.COOLDOWN_IDLE) {
+                transition(BatteryStateEvent.LOCAL_ACTIVITY_TRIGGERED)
             }
+
+            activeStreams.incrementAndGet()
+            try {
+                wifiSender?.invoke(frame)
+                outboundSink?.invoke(frame, TransportChannel.WIFI_TURBO)
+            } finally {
+                if (activeStreams.decrementAndGet() <= 0) {
+                    activeStreams.set(0)
+                    scheduleCooldownIfIdle()
+                }
+            }
+        } catch (err: Throwable) {
+            if (!fallbackToBleOnWifiError) throw err
+            isWifiSocketOpen = false
+            transition(BatteryStateEvent.COOLDOWN_EXPIRED)
+            bleSender?.invoke(frame)
+            outboundSink?.invoke(frame, TransportChannel.BLE_STANDBY)
         }
     }
 

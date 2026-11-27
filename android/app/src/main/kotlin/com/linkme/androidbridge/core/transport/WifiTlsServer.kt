@@ -5,7 +5,9 @@ import com.linkme.androidbridge.core.crypto.TrustStore
 import com.linkme.androidbridge.core.protocol.FrameDecoder
 import com.linkme.androidbridge.core.protocol.ReplayGuard
 import com.linkme.androidbridge.core.protocol.WireFrame
+import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.NetworkInterface
 import java.net.Socket
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
@@ -105,5 +107,23 @@ class WifiTlsServer(
         runCatching { serverSocket?.close() }
         serverSocket = null
         executor.shutdownNow()
+    }
+
+    companion object {
+        fun localLanIPv4Address(): String? = runCatching {
+            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return null
+            while (interfaces.hasMoreElements()) {
+                val iface = interfaces.nextElement()
+                if (!iface.isUp || iface.isLoopback) continue
+                val addrs = iface.inetAddresses
+                while (addrs.hasMoreElements()) {
+                    val addr = addrs.nextElement()
+                    if (addr is Inet4Address && !addr.isLoopbackAddress) {
+                        return addr.hostAddress
+                    }
+                }
+            }
+            null
+        }.getOrNull()
     }
 }

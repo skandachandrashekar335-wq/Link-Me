@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import MacBridgeCore
@@ -167,5 +168,190 @@ struct TransportAndLoopbackTests {
             #expect(reassembled == frame)
             #expect(decoder.bufferedByteCount == 0)
         }
+    }
+
+    @Test("End-to-end QR pairing flow derives matching SAS + ChaCha20 sessionKey and persists TrustStore")
+    func endToEndQrPairingAndTrustPersistence() async throws {
+        let macStore = InMemorySecureStore()
+        let macIdentityMgr = IdentityManager(store: macStore)
+        let macIdentity = try macIdentityMgr.loadOrCreateIdentity(deviceId: "11111111-1111-4111-8111-111111111111")
+        let macTrust = TrustStore(store: macStore)
+
+        let androidStore = InMemorySecureStore()
+        let androidIdentity = try IdentityManager(store: androidStore)
+            .loadOrCreateIdentity(deviceId: "22222222-2222-4222-8222-222222222222")
+
+        let feature = PairingFeature(identityManager: macIdentityMgr, trustStore: macTrust)
+        let (uriPayload, _) = try await feature.beginPairingSession(tcpPort: 49152, deviceName: "Skanda MacBook Pro")
+        let uriString = uriPayload.uriString
+
+        #expect(uriString.hasPrefix("linkme://pair?"))
+        let parsed = try PairingUriPayload.parse(uriString)
+        #expect(parsed.hasFullCertFingerprint)
+        #expect(parsed.certSha256Prefix == macIdentity.certificateSha256Hex.lowercased())
+
+        // Legacy andromac:// scheme remains compatible
+        let legacyUri = uriString.replacingOccurrences(of: "linkme://", with: "andromac://")
+        let legacyParsed = try PairingUriPayload.parse(legacyUri)
+        #expect(legacyParsed.deviceId == parsed.deviceId)
+
+        let androidSession = PairingCrypto()
+        let nonceData = try #require(Data(hexString: parsed.nonceHex))
+        let androidDerived = try androidSession.deriveSecrets(peerPublicKeyString: parsed.publicKeyBase64Url, nonce: nonceData)
+
+        let hello = PairHelloPayload(
+            deviceId: androidIdentity.deviceId,
+            deviceName: "Pixel 9 Pro",
+            platform: "android",
+            ephemeralPublicKey: androidSession.publicKeyBase64Url,
+            spkiSha256: androidIdentity.certificateSha256Hex
+        )
+        let pending = try await feature.handleIncomingPairHello(hello)
+        #expect(pending.sasCode == androidDerived.sasCode)
+        #expect(pending.sharedBleSecret == androidDerived.sharedBleSecret)
+        #expect(pending.bluetoothSessionKey == androidDerived.sessionKey)
+        #expect(pending.bluetoothSessionKey.count == 32)
+
+        let savedPeer = try await feature.confirmAndTrust()
+        #expect(try macTrust.peer(forDeviceId: androidIdentity.deviceId)?.bluetoothSessionKey == androidDerived.sessionKey)
+        #expect(savedPeer.pinnedCertSha256 == androidIdentity.certificateSha256Hex.lowercased())
+    }
+
+    @Test("Encrypted Bluetooth ChaCha20-Poly1305 loopback across MTU 23/512 + Wi-Fi fallback")
+    func encryptedBluetoothLoopbackAndWifiFallback() async throws {
+        let sessionKey = Data((0..<32).map { UInt8(($0 * 11 + 5) & 0xFF) })
+        let senderCipher = try BluetoothSessionCipher(sessionKey: sessionKey, senderTag: "MAC0")
+        let receiverCipher = try BluetoothSessionCipher(sessionKey: sessionKey, senderTag: "AND0")
+        let reassembler = BluetoothPacketReassembler()
+
+        func transmitOverBle(_ frame: WireFrame, mtu: Int, packetId: UInt32) throws -> WireFrame {
+            let envelope = try senderCipher.seal(frame: frame)
+            #expect(BluetoothSessionCipher.isEncryptedEnvelope(envelope))
+            let packets = BluetoothPacketCodec.packetize(envelope: envelope, packetId: packetId, mtu: mtu)
+            #expect(!packets.isEmpty)
+
+            // Deliver out-of-order when fragmented
+            let ordered = packets.count > 2 ? Array(packets.reversed()) : packets
+            var reassembledEnvelope: Data?
+            var ackPacket: BluetoothPacketCodec.AckPacket?
+            for pkt in ordered {
+                let res = reassembler.ingest(pkt)
+                if let env = res.completeEnvelope {
+                    reassembledEnvelope = env
+                    ackPacket = res.ack
+                }
+            }
+            let envelopeData = try #require(reassembledEnvelope)
+            let ack = try #require(ackPacket)
+            let decodedAck = try #require(BluetoothPacketCodec.AckPacket.decode(ack.encode()))
+            #expect(decodedAck.packetId == packetId)
+            #expect(decodedAck.receivedChunks == UInt16(packets.count))
+            return try receiverCipher.openFrame(from: envelopeData)
+        }
+
+        // 1. Clipboard Sync over minimum ATT MTU 23 (20B ATT payload -> 11B data slice)
+        let clip = ClipboardSyncPayload(
+            originDeviceId: "11111111-1111-4111-8111-111111111111",
+            clipboardEpoch: 9,
+            contentSha256: "feedbeef",
+            mimeType: "text/plain",
+            text: "Link-Me v1.0.0 Bluetooth-First ChaCha20 Sync Check!",
+            timestampMs: 1_770_000_000_000
+        )
+        let clipFrame = try WireFrame(messageType: .clipboardSync, sequenceId: 10, payload: JSONEncoder().encode(clip))
+        let rxClipFrame = try transmitOverBle(clipFrame, mtu: 23, packetId: 100)
+        let rxClip = try JSONDecoder().decode(ClipboardSyncPayload.self, from: rxClipFrame.payload)
+        #expect(rxClip.text == clip.text)
+
+        // 2. Notification Reply, Media Control, Open URL
+        let reply = DeviceCommandPayload(command: "reply", sbnKey: "notif-1", replyText: "Omw!", timestampMs: 123)
+        let rxReplyFrame = try transmitOverBle(
+            try WireFrame(messageType: .deviceCommand, sequenceId: 11, payload: JSONEncoder().encode(reply)),
+            mtu: 23,
+            packetId: 101
+        )
+        #expect(try JSONDecoder().decode(DeviceCommandPayload.self, from: rxReplyFrame.payload).replyText == "Omw!")
+
+        let media = MediaControlPayload(action: .playPause)
+        let rxMediaFrame = try transmitOverBle(
+            try WireFrame(messageType: .mediaControl, sequenceId: 12, payload: JSONEncoder().encode(media)),
+            mtu: 512,
+            packetId: 102
+        )
+        #expect(try JSONDecoder().decode(MediaControlPayload.self, from: rxMediaFrame.payload).action == .playPause)
+
+        let urlPayload = try OpenUrlPayload(url: "https://github.com/skandachandrashekar335-wq/Link-Me")
+        let rxUrlFrame = try transmitOverBle(
+            try WireFrame(messageType: .openUrl, sequenceId: 13, payload: JSONEncoder().encode(urlPayload)),
+            mtu: 512,
+            packetId: 103
+        )
+        #expect(try JSONDecoder().decode(OpenUrlPayload.self, from: rxUrlFrame.payload).url == urlPayload.url)
+
+        // 3. Multi-chunk file transfer over fragmented encrypted Bluetooth + SHA-256 verification
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent("linkme-bt-loopback-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let srcURL = tempRoot.appendingPathComponent("sample.bin")
+        let rawBytes = Data((0..<1536).map { UInt8($0 % 251) })
+        try rawBytes.write(to: srcURL)
+
+        let txFileMgr = FileTransferManager(destinationRoot: tempRoot.appendingPathComponent("tx", isDirectory: true))
+        let rxFileMgr = FileTransferManager(destinationRoot: tempRoot.appendingPathComponent("rx", isDirectory: true))
+
+        actor FrameCollector {
+            var frames: [WireFrame] = []
+            func append(_ f: WireFrame) { frames.append(f) }
+        }
+        let collector = FrameCollector()
+        let offer = try await txFileMgr.streamOutboundFile(fileURL: srcURL) { frame in
+            await collector.append(frame)
+        }
+
+        var nextPkt: UInt32 = 200
+        for rawFrame in await collector.frames {
+            let decoded = try transmitOverBle(rawFrame, mtu: 23, packetId: nextPkt)
+            nextPkt &+= 1
+            switch decoded.messageType {
+            case .fileOffer:
+                let rxOffer = try JSONDecoder().decode(FileOfferPayload.self, from: decoded.payload)
+                _ = try await rxFileMgr.beginIncomingTransfer(offer: rxOffer)
+            case .fileChunk:
+                let chunk = try FileChunkPacket.decode(from: decoded.payload)
+                _ = try await rxFileMgr.receiveChunk(chunk)
+            default:
+                break
+            }
+        }
+        let offerUUID = try #require(UUID(uuidString: offer.transferId))
+        let verifiedURL = try await rxFileMgr.finalizeIncomingTransfer(offerUUID)
+        #expect(try Data(contentsOf: verifiedURL) == rawBytes)
+
+        // 4. Tampered ciphertext fails Poly1305 verification
+        var sealed = try senderCipher.seal(plaintext: Data("secret".utf8))
+        sealed[sealed.count - 1] ^= 0xFF
+        #expect(throws: (any Error).self) {
+            _ = try receiverCipher.open(envelope: sealed)
+        }
+
+        // 5. TransportManager.sendResilientFrame falls back to BLE when Wi-Fi opener throws
+        enum TestNetError: Error { case wifiUnavailable }
+        actor ChannelLog {
+            var bleFrames: [WireFrame] = []
+            func recordBle(_ f: WireFrame) { bleFrames.append(f) }
+        }
+        let log = ChannelLog()
+        let transport = TransportManager()
+        await transport.configureTransportHooks(
+            bleSender: { frame in await log.recordBle(frame) },
+            wifiOpener: { throw TestNetError.wifiUnavailable },
+            wifiSender: { _ in },
+            wifiCloser: {}
+        )
+        let bigFrame = try WireFrame(messageType: .clipboardSync, sequenceId: 77, payload: Data(repeating: 0x33, count: 700))
+        try await transport.sendResilientFrame(bigFrame, preferBle: false)
+        #expect(await log.bleFrames.count == 1)
+        #expect(await log.bleFrames.first?.sequenceId == 77)
     }
 }

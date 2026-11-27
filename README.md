@@ -84,14 +84,14 @@ Release `.dmg` builds produced in CI are **ad-hoc signed** (`codesign --sign -`)
 
 To prevent Google Play Protect Enhanced Fraud Protection from blocking sideloads on Samsung and Android 14–16 devices, the core app does **not** declare `BIND_NOTIFICATION_LISTENER_SERVICE`:
 
-1. **Core App (`AndroidBridge-v0.2.0.apk`) — 100% Play-Protect Clean:**
+1. **Core App (`AndroidBridge-v1.0.0.apk`) — 100% Play-Protect Clean:**
    Install directly on your phone (supports BLE discovery, QR pairing, Universal Clipboard Sync, File Beam up to 4.0 GB over mTLS 1.3, battery telemetry, and Ring My Phone), or install via ADB:
    ```bash
-   adb install -r AndroidBridge-v0.2.0.apk
+   adb install -r AndroidBridge-v1.0.0.apk
    ```
-2. **Optional Notification Mirroring Add-on (`AndroidBridge-NotifyAddon-v0.2.0.apk`):**
+2. **Optional Notification Mirroring Add-on (`AndroidBridge-NotifyAddon-v1.0.0.apk`):**
    If you want mirrored Android notifications and inline replies on macOS, install the companion add-on (signed with the same release key so IPC uses Android `signature`-level `com.linkme.androidbridge.permission.MIRROR_IPC`):
    ```bash
-   adb install -r AndroidBridge-v0.2.0.apk && adb install -r AndroidBridge-NotifyAddon-v0.2.0.apk
+   adb install -r AndroidBridge-v1.0.0.apk && adb install -r AndroidBridge-NotifyAddon-v1.0.0.apk
    ```
    Then open **Settings → Notifications → Notification read, reply & control (Notification access)** and enable **Link-Me Notify Add-on**.

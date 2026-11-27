@@ -2,6 +2,8 @@ package com.linkme.androidbridge.core.crypto
 
 import java.math.BigInteger
 import java.net.URI
+import java.net.URLDecoder
+import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.security.SecureRandom
 import java.util.Base64
@@ -14,28 +16,70 @@ data class PairingUriPayload(
     val publicKeyBase64Url: String,
     val certSha256Prefix: String,
     val nonceHex: String,
-    val tcpPort: Int
+    val tcpPort: Int,
+    val bleServiceUuid: String? = DEFAULT_BLE_SERVICE_UUID,
+    val lanHost: String? = null,
+    val deviceName: String? = null
 ) {
+    val hasFullCertFingerprint: Boolean
+        get() = certSha256Prefix.length == 64 && certSha256Prefix.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+
     val uriString: String
-        get() = "andromac://pair?v=$version&id=$deviceId&pub=$publicKeyBase64Url&fp=$certSha256Prefix&nonce=$nonceHex&port=$tcpPort"
+        get() = buildString {
+            append("linkme://pair?v=").append(version)
+            append("&id=").append(encodeParam(deviceId))
+            append("&pub=").append(encodeParam(publicKeyBase64Url))
+            append("&fp=").append(encodeParam(certSha256Prefix.lowercase()))
+            append("&nonce=").append(encodeParam(nonceHex))
+            append("&port=").append(tcpPort)
+            if (!bleServiceUuid.isNullOrBlank()) {
+                append("&ble=").append(encodeParam(bleServiceUuid))
+            }
+            if (!lanHost.isNullOrBlank()) {
+                append("&host=").append(encodeParam(lanHost))
+            }
+            if (!deviceName.isNullOrBlank()) {
+                append("&name=").append(encodeParam(deviceName))
+            }
+        }
 
     companion object {
+        const val DEFAULT_BLE_SERVICE_UUID = "414D0001-0000-1000-8000-00805F9B34FB"
+
+        private fun encodeParam(value: String): String =
+            URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+
         fun parse(uriString: String): PairingUriPayload {
-            val uri = URI.create(uriString)
-            require(uri.scheme == "andromac" && uri.host == "pair") { "Invalid pairing URI scheme" }
-            val query = uri.rawQuery.orEmpty().split("&").associate { pair ->
+            val uri = URI.create(uriString.trim())
+            val scheme = uri.scheme?.lowercase()
+            require((scheme == "linkme" || scheme == "andromac") && uri.host == "pair") {
+                "Invalid pairing URI scheme (expected linkme://pair)"
+            }
+            val query = uri.rawQuery.orEmpty().split("&").filter { it.isNotEmpty() }.associate { pair ->
                 val parts = pair.split("=", limit = 2)
                 require(parts.size == 2) { "Malformed query parameter" }
-                parts[0] to parts[1]
+                val key = URLDecoder.decode(parts[0], Charsets.UTF_8.name())
+                val value = URLDecoder.decode(parts[1], Charsets.UTF_8.name())
+                key to value
             }
             val version = query["v"]?.toIntOrNull() ?: error("Missing v")
             require(version == 1) { "Unsupported pairing version" }
             val deviceId = query["id"]?.takeIf { it.isNotEmpty() } ?: error("Missing id")
             val pub = query["pub"]?.takeIf { it.isNotEmpty() } ?: error("Missing pub")
-            val fp = query["fp"]?.takeIf { it.isNotEmpty() } ?: error("Missing fp")
+            val fp = query["fp"]?.takeIf { it.length >= 16 }?.lowercase() ?: error("Missing fp")
             val nonce = query["nonce"]?.takeIf { it.length == 32 } ?: error("Invalid nonce")
             val port = query["port"]?.toIntOrNull()?.takeIf { it in 1..65535 } ?: error("Invalid port")
-            return PairingUriPayload(version, deviceId, pub, fp, nonce, port)
+            return PairingUriPayload(
+                version = version,
+                deviceId = deviceId,
+                publicKeyBase64Url = pub,
+                certSha256Prefix = fp,
+                nonceHex = nonce,
+                tcpPort = port,
+                bleServiceUuid = query["ble"] ?: DEFAULT_BLE_SERVICE_UUID,
+                lanHost = query["host"]?.takeIf { it.isNotBlank() },
+                deviceName = query["name"]?.takeIf { it.isNotBlank() }
+            )
         }
     }
 }
@@ -77,14 +121,24 @@ class PairingCrypto(
     fun isExpired(nowMs: Long = System.currentTimeMillis()): Boolean =
         (nowMs - createdAtMs) > SESSION_TTL_MS
 
-    fun makePairingUri(deviceId: String, certSha256Hex: String, tcpPort: Int): PairingUriPayload =
+    fun makePairingUri(
+        deviceId: String,
+        certSha256Hex: String,
+        tcpPort: Int,
+        bleServiceUuid: String? = PairingUriPayload.DEFAULT_BLE_SERVICE_UUID,
+        lanHost: String? = null,
+        deviceName: String? = null
+    ): PairingUriPayload =
         PairingUriPayload(
             version = 1,
             deviceId = deviceId,
             publicKeyBase64Url = publicKeyBase64Url,
-            certSha256Prefix = certSha256Hex.take(16),
+            certSha256Prefix = certSha256Hex.lowercase(),
             nonceHex = nonce.joinToString("") { "%02x".format(it) },
-            tcpPort = tcpPort
+            tcpPort = tcpPort,
+            bleServiceUuid = bleServiceUuid,
+            lanHost = lanHost,
+            deviceName = deviceName
         )
 
     fun deriveSecrets(

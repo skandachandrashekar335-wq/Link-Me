@@ -30,12 +30,15 @@ import com.linkme.androidbridge.core.protocol.DeviceCommandPayload
 import com.linkme.androidbridge.core.protocol.FileChunkPacket
 import com.linkme.androidbridge.core.protocol.FileOfferPayload
 import com.linkme.androidbridge.core.protocol.FileResponsePayload
+import com.linkme.androidbridge.core.protocol.FrameEncoder
 import com.linkme.androidbridge.core.protocol.MediaControlPayload
 import com.linkme.androidbridge.core.protocol.OpenUrlPayload
 import com.linkme.androidbridge.core.protocol.WakeWifiPayload
 import com.linkme.androidbridge.core.protocol.WireFrame
 import com.linkme.androidbridge.core.protocol.WireMessageType
+import com.linkme.androidbridge.core.transport.BleGattClient
 import com.linkme.androidbridge.core.transport.BlePeripheralManager
+import com.linkme.androidbridge.core.transport.NsdDiscoveryManager
 import com.linkme.androidbridge.core.transport.TransferPriority
 import com.linkme.androidbridge.core.transport.TransportManager
 import com.linkme.androidbridge.core.transport.WifiTlsClient
@@ -48,6 +51,9 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -73,6 +79,8 @@ class BridgeForegroundService : Service() {
     @Volatile private var continuityFeature: ContinuityFeature? = null
     @Volatile private var preferencesStore: BridgePreferencesStore? = null
     @Volatile private var blePeripheralManager: BlePeripheralManager? = null
+    @Volatile private var bleGattClient: BleGattClient? = null
+    @Volatile private var nsdDiscoveryManager: NsdDiscoveryManager? = null
     @Volatile private var wifiTlsServer: WifiTlsServer? = null
     @Volatile private var wifiTlsClient: WifiTlsClient? = null
 
@@ -122,10 +130,16 @@ class BridgeForegroundService : Service() {
         NotificationCompanionBridge.onNotificationEvent = null
         BridgeActivityHub.onSendMediaAction = null
         BridgeActivityHub.onSendOpenUrl = null
+        BridgeActivityHub.onSendFileUri = null
         BridgeActivityHub.onResolvePendingFileOffer = null
+        BridgeActivityHub.onSendPairHello = null
+        BridgeActivityHub.onSendDeviceCommand = null
+        BridgeActivityHub.onPeerTrustedUpdated = null
         onManualClipboardSyncRequested = null
 
         runCatching { stopWifiTransport() }
+        runCatching { nsdDiscoveryManager?.unregister() }
+        runCatching { bleGattClient?.shutdown() }
         runCatching { blePeripheralManager?.shutdown() }
         runCatching { transportManager?.shutdown() }
         serviceScope.cancel()
@@ -160,9 +174,17 @@ class BridgeForegroundService : Service() {
             val telemetry = TelemetryFeature(localIdentity.deviceId)
 
             val transport = TransportManager(
-                bleSender = { frame -> blePeripheralManager?.sendControlFrame(frame) },
+                bleSender = { frame ->
+                    val clientSent = bleGattClient?.takeIf { it.isConnected }?.sendFrame(frame) == true
+                    if (!clientSent) {
+                        blePeripheralManager?.sendControlFrame(frame)
+                    }
+                },
                 wifiOpener = { startOnDemandWifiServer() },
-                wifiSender = { frame -> wifiTlsClient?.send(frame) },
+                wifiSender = { frame ->
+                    val client = wifiTlsClient ?: error("Wi-Fi peer client not connected")
+                    client.send(frame)
+                },
                 wifiCloser = { stopWifiTransport() }
             )
 
@@ -256,13 +278,127 @@ class BridgeForegroundService : Service() {
             val peripheral = BlePeripheralManager(
                 context = this,
                 beacon = beacon,
+                trustStore = store,
                 onInboundFrame = { frame ->
                     serviceScope.launch {
                         runCatching { routeInboundFrame(frame) }
                     }
+                },
+                onConnectionChanged = { connected ->
+                    BridgeActivityHub.updateConnectionState(
+                        bleConnected = connected || (bleGattClient?.isConnected == true)
+                    )
                 }
             )
             blePeripheralManager = peripheral
+
+            val gattClient = BleGattClient(
+                context = this,
+                trustStore = store,
+                onInboundFrame = { frame ->
+                    serviceScope.launch {
+                        runCatching { routeInboundFrame(frame) }
+                    }
+                },
+                onConnectionChanged = { connected ->
+                    BridgeActivityHub.updateConnectionState(
+                        bleConnected = connected || peripheral.isClientConnected
+                    )
+                },
+                onLatencyMeasured = { rttMs ->
+                    BridgeActivityHub.updateConnectionState(latency = rttMs)
+                }
+            )
+            bleGattClient = gattClient
+            if (pairedPeer != null) {
+                gattClient.startScanning(autoReconnect = true)
+            }
+
+            nsdDiscoveryManager = NsdDiscoveryManager(this)
+
+            BridgeActivityHub.onSendPairHello = { hello, lanHost, tcpPort ->
+                serviceScope.launch {
+                    val payloadBytes = json.encodeToString(hello).toByteArray(Charsets.UTF_8)
+                    val pairFrame = WireFrame(WireMessageType.PAIR_HELLO, 1L, payloadBytes)
+                    gattClient.sendPairingHelloOverBle(pairFrame)
+                    if (!lanHost.isNullOrBlank() && tcpPort > 0) {
+                        runCatching {
+                            Socket().use { sock ->
+                                sock.connect(InetSocketAddress(lanHost, tcpPort), 2500)
+                                sock.getOutputStream().write(FrameEncoder.encode(pairFrame))
+                                sock.getOutputStream().flush()
+                            }
+                        }
+                    }
+                    BridgeActivityHub.record(
+                        BridgeActivityItem(
+                            category = ActivityCategory.SYSTEM,
+                            title = "Pairing Handshake Sent",
+                            detail = "X25519 PAIR_HELLO over Bluetooth${if (lanHost != null) " + LAN" else ""}"
+                        )
+                    )
+                }
+            }
+
+            BridgeActivityHub.onSendDeviceCommand = { command ->
+                serviceScope.launch {
+                    runCatching {
+                        val bytes = json.encodeToString(command).toByteArray(Charsets.UTF_8)
+                        val frame = transport.makeFrame(WireMessageType.DEVICE_COMMAND, bytes)
+                        transport.sendResilientFrame(frame, preferBle = true)
+                    }
+                }
+            }
+
+            BridgeActivityHub.onPeerTrustedUpdated = {
+                serviceScope.launch {
+                    gattClient.startScanning(autoReconnect = true)
+                }
+            }
+
+            BridgeActivityHub.onSendFileUri = { uriStr ->
+                serviceScope.launch {
+                    runCatching {
+                        val uri = android.net.Uri.parse(uriStr)
+                        var displayName = "shared_file.bin"
+                        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                            if (c.moveToFirst()) {
+                                val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                                if (idx >= 0) displayName = c.getString(idx) ?: displayName
+                            }
+                        }
+                        val safeName = com.linkme.androidbridge.core.protocol.FilenameSanitizer.sanitize(displayName)
+                        val stagingDir = File(cacheDir, "outbound_staging").apply { mkdirs() }
+                        val staged = File(stagingDir, safeName)
+                        contentResolver.openInputStream(uri)?.use { input ->
+                            staged.outputStream().use { out ->
+                                val buf = ByteArray(FileTransferManager.CHUNK_SIZE)
+                                while (true) {
+                                    val n = input.read(buf)
+                                    if (n <= 0) break
+                                    out.write(buf, 0, n)
+                                }
+                            }
+                        }
+                        try {
+                            transferMgr.streamOutboundFile(
+                                sourceFile = staged,
+                                emitFrame = { frame -> transport.sendResilientFrame(frame, preferBle = false) }
+                            )
+                            BridgeActivityHub.record(
+                                BridgeActivityItem(
+                                    category = ActivityCategory.FILES,
+                                    title = "Sent File to Mac",
+                                    detail = safeName,
+                                    fileUriString = uriStr
+                                )
+                            )
+                        } finally {
+                            staged.delete()
+                        }
+                    }
+                }
+            }
 
             val powerMgr = getSystemService(PowerManager::class.java)
             peripheral.setBatterySaverActive(powerMgr?.isPowerSaveMode == true)
@@ -346,7 +482,13 @@ class BridgeForegroundService : Service() {
             }
         )
         wifiTlsServer = server
-        return server.start(0)
+        val port = server.start(0, InetAddress.getByName("0.0.0.0"))
+        runCatching {
+            val localId = idMgr.loadOrCreateIdentity().deviceId
+            nsdDiscoveryManager?.registerService(localId, port)
+        }
+        BridgeActivityHub.updateConnectionState(wifiActive = true)
+        return port
     }
 
     private fun stopWifiTransport() {
@@ -354,6 +496,8 @@ class BridgeForegroundService : Service() {
         wifiTlsClient = null
         runCatching { wifiTlsServer?.stop() }
         wifiTlsServer = null
+        runCatching { nsdDiscoveryManager?.unregister() }
+        BridgeActivityHub.updateConnectionState(wifiActive = false)
     }
 
     private fun routeInboundFrame(frame: WireFrame) {
@@ -365,7 +509,26 @@ class BridgeForegroundService : Service() {
         when (frame.messageType) {
             WireMessageType.WAKE_WIFI -> {
                 runCatching { json.decodeFromString<WakeWifiPayload>(frame.payload.decodeToString()) }
-                    .onSuccess { startOnDemandWifiServer() }
+                    .onSuccess { wake ->
+                        val localPort = startOnDemandWifiServer()
+                        val hostHint = wake.hostHints.firstOrNull { !it.endsWith(".local.") }
+                        val idMgr = identityManager
+                        val store = trustStore
+                        val peerId = store?.allPeers()?.firstOrNull()?.deviceId
+                        if (hostHint != null && wake.servicePort in 1024..65535 && idMgr != null && peerId != null) {
+                            runCatching {
+                                val client = WifiTlsClient(idMgr, store, peerId)
+                                client.connect(hostHint, wake.servicePort)
+                                wifiTlsClient = client
+                                BridgeActivityHub.updateConnectionState(wifiActive = true)
+                            }.onFailure {
+                                wifiTlsClient = null
+                                BridgeActivityHub.updateConnectionState(wifiActive = false)
+                            }
+                        } else if (localPort > 0) {
+                            BridgeActivityHub.updateConnectionState(wifiActive = true)
+                        }
+                    }
             }
 
             WireMessageType.CLIPBOARD_SYNC -> {

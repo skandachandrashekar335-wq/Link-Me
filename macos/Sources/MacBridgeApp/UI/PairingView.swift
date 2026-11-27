@@ -12,27 +12,27 @@ struct PairingView: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            Text("CURVE25519 // QR PAIRING")
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
+            Text("CURVE25519 // LIQUID CONTINUITY PAIRING")
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
                 .foregroundStyle(pal.primaryAccent)
 
             Text("Pair Android Device")
-                .font(.headline)
+                .font(.system(size: 18, weight: .bold))
                 .foregroundStyle(pal.onSurface)
 
-            if let nsImage = qrNSImage(from: viewModel.pairingUriString) {
+            if let nsImage = Self.makeQRNSImage(from: viewModel.pairingUriString) {
                 Image(nsImage: nsImage)
                     .interpolation(.none)
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 184, height: 184)
-                    .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.white))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(pal.outlineVariant, lineWidth: 1))
+                    .frame(width: 196, height: 196)
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 16).fill(Color.white))
+                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(pal.outlineVariant, lineWidth: 1))
             } else {
-                RoundedRectangle(cornerRadius: 10)
+                RoundedRectangle(cornerRadius: 16)
                     .fill(pal.surfaceContainer)
-                    .frame(width: 184, height: 184)
+                    .frame(width: 196, height: 196)
                     .overlay {
                         Image(systemName: "qrcode")
                             .font(.largeTitle)
@@ -40,30 +40,28 @@ struct PairingView: View {
                     }
             }
 
-            Text("EXPIRES IN \(formattedCountdown)")
-                .font(.system(.caption, design: .monospaced))
+            Text("EXPIRES IN \(formattedCountdown) • BLE + LAN")
+                .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(pal.secondaryText)
 
             if let approval = viewModel.pendingApproval {
                 VStack(spacing: 6) {
                     Text("Incoming peer: \(approval.peerDeviceName)")
-                        .font(.subheadline.weight(.medium))
+                        .font(.system(size: 13, weight: .medium))
                     Text(approval.sasCode)
-                        .font(.system(.title, design: .monospaced).bold())
+                        .font(.system(size: 28, weight: .bold, design: .monospaced))
                         .tracking(4)
                         .foregroundStyle(pal.secondaryAccent)
                 }
-                .padding(10)
+                .padding(12)
                 .frame(maxWidth: .infinity)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(pal.surfaceContainer)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(pal.primaryAccent, lineWidth: 1))
-                )
+                .liquidGlassCard(pal, cornerRadius: 14, highlighted: true)
+
                 HStack(spacing: 12) {
                     Button("Reject", role: .destructive) {
                         viewModel.rejectPairing()
                     }
+                    .buttonStyle(.bordered)
                     Button("Confirm & Trust") {
                         viewModel.confirmPairing()
                     }
@@ -71,17 +69,26 @@ struct PairingView: View {
                     .tint(pal.primaryAccent)
                 }
             } else {
-                Text("Scan with AndroidBridge to verify 6-digit SAS")
-                    .font(.caption)
+                Text("Scan with AndroidBridge CameraX QR Scanner")
+                    .font(.system(size: 12))
                     .foregroundStyle(pal.secondaryText)
-                Button("Close") {
-                    viewModel.rejectPairing()
+                HStack(spacing: 10) {
+                    Button("Copy Pairing URI") {
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.setString(viewModel.pairingUriString, forType: .string)
+                        viewModel.statusBanner = "Copied linkme://pair URI"
+                    }
+                    .buttonStyle(.bordered)
+                    Button("Close") {
+                        viewModel.rejectPairing()
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.bordered)
             }
         }
-        .padding(20)
-        .frame(width: 340)
+        .padding(22)
+        .frame(width: 380)
         .background(pal.surface)
         .foregroundStyle(pal.onSurface)
         .onReceive(countdownTimer) { now in
@@ -95,7 +102,7 @@ struct PairingView: View {
         return String(format: "%d:%02d", mins, secs)
     }
 
-    private func qrNSImage(from uri: String) -> NSImage? {
+    static func makeQRNSImage(from uri: String) -> NSImage? {
         guard !uri.isEmpty,
               let ciImage = PairingFeature.generateQRCodeCIImage(from: uri) else {
             return nil

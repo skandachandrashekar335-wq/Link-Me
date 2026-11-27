@@ -6,12 +6,44 @@ public struct TrustedPeer: Codable, Sendable, Equatable {
     public let deviceName: String
     public let pinnedCertSha256: String
     public let sharedBleSecret: Data
+    public let bluetoothSessionKey: Data
 
-    public init(deviceId: String, deviceName: String, pinnedCertSha256: String, sharedBleSecret: Data) {
+    public init(
+        deviceId: String,
+        deviceName: String,
+        pinnedCertSha256: String,
+        sharedBleSecret: Data,
+        bluetoothSessionKey: Data? = nil
+    ) {
         self.deviceId = deviceId
         self.deviceName = deviceName
         self.pinnedCertSha256 = pinnedCertSha256.lowercased()
         self.sharedBleSecret = sharedBleSecret
+        if let bluetoothSessionKey, bluetoothSessionKey.count == 32 {
+            self.bluetoothSessionKey = bluetoothSessionKey
+        } else {
+            self.bluetoothSessionKey = Self.deriveFallbackSessionKey(from: sharedBleSecret)
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        deviceId = try container.decode(String.self, forKey: .deviceId)
+        deviceName = try container.decode(String.self, forKey: .deviceName)
+        pinnedCertSha256 = try container.decode(String.self, forKey: .pinnedCertSha256).lowercased()
+        sharedBleSecret = try container.decode(Data.self, forKey: .sharedBleSecret)
+        if let decodedKey = try container.decodeIfPresent(Data.self, forKey: .bluetoothSessionKey),
+           decodedKey.count == 32 {
+            bluetoothSessionKey = decodedKey
+        } else {
+            bluetoothSessionKey = Self.deriveFallbackSessionKey(from: sharedBleSecret)
+        }
+    }
+
+    private static func deriveFallbackSessionKey(from bleSecret: Data) -> Data {
+        var input = bleSecret
+        input.append(Data("LinkMe-BT-Session-v1".utf8))
+        return Data(SHA256.hash(data: input))
     }
 }
 

@@ -10,31 +10,84 @@ public enum PairingCryptoError: Error, Equatable, Sendable {
 }
 
 public struct PairingUriPayload: Sendable, Equatable {
+    public static let defaultBleServiceUuid = "414D0001-0000-1000-8000-00805F9B34FB"
+
     public let version: Int
     public let deviceId: String
     public let publicKeyBase64Url: String
     public let certSha256Prefix: String
     public let nonceHex: String
     public let tcpPort: UInt16
+    public let bleServiceUuid: String?
+    public let lanHost: String?
+    public let deviceName: String?
+
+    public init(
+        version: Int,
+        deviceId: String,
+        publicKeyBase64Url: String,
+        certSha256Prefix: String,
+        nonceHex: String,
+        tcpPort: UInt16,
+        bleServiceUuid: String? = PairingUriPayload.defaultBleServiceUuid,
+        lanHost: String? = nil,
+        deviceName: String? = nil
+    ) {
+        self.version = version
+        self.deviceId = deviceId
+        self.publicKeyBase64Url = publicKeyBase64Url
+        self.certSha256Prefix = certSha256Prefix.lowercased()
+        self.nonceHex = nonceHex
+        self.tcpPort = tcpPort
+        self.bleServiceUuid = bleServiceUuid
+        self.lanHost = lanHost
+        self.deviceName = deviceName
+    }
+
+    public var hasFullCertFingerprint: Bool {
+        certSha256Prefix.count == 64 && Data(hexString: certSha256Prefix) != nil
+    }
 
     public var uriString: String {
-        "andromac://pair?v=\(version)&id=\(deviceId)&pub=\(publicKeyBase64Url)&fp=\(certSha256Prefix)&nonce=\(nonceHex)&port=\(tcpPort)"
+        var components = URLComponents()
+        components.scheme = "linkme"
+        components.host = "pair"
+        var queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "v", value: String(version)),
+            URLQueryItem(name: "id", value: deviceId),
+            URLQueryItem(name: "pub", value: publicKeyBase64Url),
+            URLQueryItem(name: "fp", value: certSha256Prefix),
+            URLQueryItem(name: "nonce", value: nonceHex),
+            URLQueryItem(name: "port", value: String(tcpPort))
+        ]
+        if let ble = bleServiceUuid, !ble.isEmpty {
+            queryItems.append(URLQueryItem(name: "ble", value: ble))
+        }
+        if let host = lanHost, !host.isEmpty {
+            queryItems.append(URLQueryItem(name: "host", value: host))
+        }
+        if let name = deviceName, !name.isEmpty {
+            queryItems.append(URLQueryItem(name: "name", value: name))
+        }
+        components.queryItems = queryItems
+        return components.string ?? "linkme://pair?v=\(version)&id=\(deviceId)&pub=\(publicKeyBase64Url)&fp=\(certSha256Prefix)&nonce=\(nonceHex)&port=\(tcpPort)"
     }
 
     public static func parse(_ uri: String) throws -> PairingUriPayload {
-        guard let components = URLComponents(string: uri),
-              components.scheme == "andromac",
+        guard let components = URLComponents(string: uri.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "linkme" || scheme == "andromac",
               components.host == "pair",
               let items = components.queryItems else {
             throw PairingCryptoError.invalidUri
         }
-        let dict = Dictionary(uniqueKeysWithValues: items.compactMap { item in
+        let dict = Dictionary(items.compactMap { item in
             item.value.map { (item.name, $0) }
-        })
+        }, uniquingKeysWith: { _, latest in latest })
         guard let vStr = dict["v"], let version = Int(vStr), version == 1,
               let deviceId = dict["id"], !deviceId.isEmpty,
               let pub = dict["pub"], !pub.isEmpty,
-              let fp = dict["fp"], !fp.isEmpty,
+              let fp = dict["fp"], fp.count >= 16,
               let nonce = dict["nonce"], nonce.count == 32, Data(hexString: nonce) != nil,
               let portStr = dict["port"], let port = UInt16(portStr) else {
             throw PairingCryptoError.invalidUri
@@ -45,7 +98,10 @@ public struct PairingUriPayload: Sendable, Equatable {
             publicKeyBase64Url: pub,
             certSha256Prefix: fp,
             nonceHex: nonce,
-            tcpPort: port
+            tcpPort: port,
+            bleServiceUuid: dict["ble"] ?? defaultBleServiceUuid,
+            lanHost: dict["host"],
+            deviceName: dict["name"]
         )
     }
 }
@@ -104,15 +160,21 @@ public struct PairingCrypto: @unchecked Sendable {
     public func makePairingUri(
         deviceId: String,
         certSha256Hex: String,
-        tcpPort: UInt16
+        tcpPort: UInt16,
+        bleServiceUuid: String? = PairingUriPayload.defaultBleServiceUuid,
+        lanHost: String? = nil,
+        deviceName: String? = nil
     ) -> PairingUriPayload {
         PairingUriPayload(
             version: 1,
             deviceId: deviceId,
             publicKeyBase64Url: publicKeyBase64Url,
-            certSha256Prefix: String(certSha256Hex.prefix(16)),
+            certSha256Prefix: certSha256Hex.lowercased(),
             nonceHex: nonce.hexString,
-            tcpPort: tcpPort
+            tcpPort: tcpPort,
+            bleServiceUuid: bleServiceUuid,
+            lanHost: lanHost,
+            deviceName: deviceName
         )
     }
 

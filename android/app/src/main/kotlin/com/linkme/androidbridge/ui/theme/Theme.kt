@@ -48,6 +48,24 @@ data class BridgeThemePalette(
 )
 
 fun paletteForTheme(theme: BridgeAccentTheme): BridgeThemePalette = when (theme) {
+    BridgeAccentTheme.LIQUID_BLUE -> BridgeThemePalette(
+        theme = theme,
+        surfaceLowest = Color(0xFF0D0E11),
+        surface = Color(0xFF101114),
+        surfaceLow = Color(0xFF17191D),
+        surfaceContainer = Color(0xFF202329),
+        surfaceHigh = Color(0xFF292A2D),
+        surfaceHighest = Color(0xFF343538),
+        primaryAccent = Color(0xFF0A84FF),
+        secondaryAccent = Color(0xFF30D158),
+        activeCardLight = Color(0xFFAAC7FF),
+        activeCardInk = Color(0xFF001B3E),
+        outlineVariant = Color(0x1AFFFFFF),
+        onSurface = Color(0xFFF5F5F7),
+        secondaryText = Color(0xFFA1A1AA),
+        isLight = false
+    )
+
     BridgeAccentTheme.CRIMSON -> BridgeThemePalette(
         theme = theme,
         surfaceLowest = Color(0xFF0D0E10),
@@ -121,11 +139,11 @@ fun paletteForTheme(theme: BridgeAccentTheme): BridgeThemePalette = when (theme)
     )
 }
 
-val LocalBridgePalette = staticCompositionLocalOf { paletteForTheme(BridgeAccentTheme.CRIMSON) }
+val LocalBridgePalette = staticCompositionLocalOf { paletteForTheme(BridgeAccentTheme.LIQUID_BLUE) }
 
 @Composable
 fun AndroidBridgeTheme(
-    accentTheme: BridgeAccentTheme = BridgeAccentTheme.CRIMSON,
+    accentTheme: BridgeAccentTheme = BridgeAccentTheme.LIQUID_BLUE,
     content: @Composable () -> Unit
 ) {
     val palette = paletteForTheme(accentTheme)

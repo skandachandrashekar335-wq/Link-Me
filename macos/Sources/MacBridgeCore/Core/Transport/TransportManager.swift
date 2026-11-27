@@ -117,20 +117,28 @@ public actor TransportManager: FrameTransportSink {
         deviceId: String = "11111111-1111-4111-8111-111111111111"
     ) async throws {
         let frame = try makeFrame(messageType: msgType, payload: payload)
-        try await routeFrame(frame, priority: priority, deviceId: deviceId)
+        try await routeFrame(frame, priority: priority, deviceId: deviceId, fallbackToBleOnWifiError: false)
     }
 
     public func sendFrame(_ frame: WireFrame, preferBleIfSmall: Bool = false) async throws {
         let priority: TransferPriority = (preferBleIfSmall && frame.payload.count <= Self.bleControlThresholdBytes)
             ? .lowLatencyControl
             : .highThroughput
-        try await routeFrame(frame, priority: priority, deviceId: "11111111-1111-4111-8111-111111111111")
+        try await routeFrame(frame, priority: priority, deviceId: "11111111-1111-4111-8111-111111111111", fallbackToBleOnWifiError: false)
+    }
+
+    /// Dual-mode resilient send: attempts Wi-Fi mTLS when LAN is available, and seamlessly falls back
+    /// to encrypted Bluetooth GATT/L2CAP when Wi-Fi is off, isolated, or in Bluetooth-only mode.
+    public func sendResilientFrame(_ frame: WireFrame, preferBle: Bool = false) async throws {
+        let priority: TransferPriority = preferBle ? .lowLatencyControl : .highThroughput
+        try await routeFrame(frame, priority: priority, deviceId: "11111111-1111-4111-8111-111111111111", fallbackToBleOnWifiError: true)
     }
 
     private func routeFrame(
         _ frame: WireFrame,
         priority: TransferPriority,
-        deviceId: String
+        deviceId: String,
+        fallbackToBleOnWifiError: Bool
     ) async throws {
         // Small low-latency control frames stay over BLE when Wi-Fi isn't needed
         if frame.payload.count <= Self.bleControlThresholdBytes && priority == .lowLatencyControl {
@@ -140,7 +148,7 @@ public actor TransportManager: FrameTransportSink {
         }
 
         if bleOnlyBatterySaver {
-            if frame.payload.count <= Self.bleControlThresholdBytes {
+            if frame.payload.count <= Self.bleControlThresholdBytes || fallbackToBleOnWifiError {
                 try await bleSender?(frame)
                 await outboundRecorder?(frame, .bleStandby)
                 return
@@ -148,41 +156,80 @@ public actor TransportManager: FrameTransportSink {
             throw TransportError.bleOnlyBatterySaverBlocked
         }
 
-        // High-throughput or > 400B payload: wake Wi-Fi mTLS 1.3
+        // High-throughput or > 400B payload: try Wi-Fi mTLS 1.3, fall back cleanly to Bluetooth if LAN unavailable
         cooldownTask?.cancel()
         cooldownTask = nil
 
-        if !isWifiSocketOpen {
-            _ = transition(.localActivityTriggered)
-            let ephemeralPort = try await wifiOpener?() ?? 49152
-            let wakePayload = WakeWifiPayload(
-                msgType: "WAKE_WIFI",
-                deviceId: deviceId,
-                servicePort: ephemeralPort,
-                hostHints: ["_andromac._tcp.local."],
-                bleTokenHex: "0000000000000000",
-                reason: "high_throughput",
-                timestampMs: UInt64(Date().timeIntervalSince1970 * 1000)
-            )
-            let wakeData = try JSONEncoder().encode(wakePayload)
-            let wakeFrame = try makeFrame(messageType: .wakeWifi, payload: wakeData)
-            try await bleSender?(wakeFrame)
-            await outboundRecorder?(wakeFrame, .bleStandby)
+        do {
+            if !isWifiSocketOpen {
+                guard let opener = wifiOpener, let _ = wifiSender else {
+                    if fallbackToBleOnWifiError {
+                        try await bleSender?(frame)
+                        await outboundRecorder?(frame, .bleStandby)
+                        return
+                    }
+                    _ = transition(.localActivityTriggered)
+                    let fallbackPort: UInt16 = 49152
+                    let wakePayload = WakeWifiPayload(
+                        msgType: "WAKE_WIFI",
+                        deviceId: deviceId,
+                        servicePort: fallbackPort,
+                        hostHints: ["_andromac._tcp.local."],
+                        bleTokenHex: "0000000000000000",
+                        reason: "high_throughput",
+                        timestampMs: UInt64(Date().timeIntervalSince1970 * 1000)
+                    )
+                    let wakeData = try JSONEncoder().encode(wakePayload)
+                    let wakeFrame = try makeFrame(messageType: .wakeWifi, payload: wakeData)
+                    try await bleSender?(wakeFrame)
+                    await outboundRecorder?(wakeFrame, .bleStandby)
+                    _ = transition(.mtlsHandshakeSucceeded)
+                    isWifiSocketOpen = true
+                    activeStreams += 1
+                    defer {
+                        activeStreams = max(0, activeStreams - 1)
+                        scheduleCooldownIfIdle()
+                    }
+                    await outboundRecorder?(frame, .wifiTurbo)
+                    return
+                }
+                _ = transition(.localActivityTriggered)
+                let ephemeralPort = try await opener()
+                let wakePayload = WakeWifiPayload(
+                    msgType: "WAKE_WIFI",
+                    deviceId: deviceId,
+                    servicePort: ephemeralPort,
+                    hostHints: ["_andromac._tcp.local."],
+                    bleTokenHex: "0000000000000000",
+                    reason: "high_throughput",
+                    timestampMs: UInt64(Date().timeIntervalSince1970 * 1000)
+                )
+                let wakeData = try JSONEncoder().encode(wakePayload)
+                let wakeFrame = try makeFrame(messageType: .wakeWifi, payload: wakeData)
+                try await bleSender?(wakeFrame)
+                await outboundRecorder?(wakeFrame, .bleStandby)
 
-            _ = transition(.mtlsHandshakeSucceeded)
-            isWifiSocketOpen = true
-        } else if bridgeState == .cooldownIdle {
-            _ = transition(.localActivityTriggered)
+                _ = transition(.mtlsHandshakeSucceeded)
+                isWifiSocketOpen = true
+            } else if bridgeState == .cooldownIdle {
+                _ = transition(.localActivityTriggered)
+            }
+
+            activeStreams += 1
+            defer {
+                activeStreams = max(0, activeStreams - 1)
+                scheduleCooldownIfIdle()
+            }
+
+            try await wifiSender?(frame)
+            await outboundRecorder?(frame, .wifiTurbo)
+        } catch {
+            guard fallbackToBleOnWifiError else { throw error }
+            isWifiSocketOpen = false
+            _ = transition(.cooldownExpired)
+            try await bleSender?(frame)
+            await outboundRecorder?(frame, .bleStandby)
         }
-
-        activeStreams += 1
-        defer {
-            activeStreams = max(0, activeStreams - 1)
-            scheduleCooldownIfIdle()
-        }
-
-        try await wifiSender?(frame)
-        await outboundRecorder?(frame, .wifiTurbo)
     }
 
     public func scheduleCooldownIfIdle() {

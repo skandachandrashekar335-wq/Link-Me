@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
 enum class BridgeAccentTheme(val key: String, val displayName: String) {
+    LIQUID_BLUE("liquidBlue", "Electric Blue"),
     CRIMSON("crimson", "Crimson"),
     MINT("mint", "Mint"),
     AMBER("amber", "Amber"),
@@ -16,7 +17,7 @@ enum class BridgeAccentTheme(val key: String, val displayName: String) {
 
     companion object {
         fun fromKey(raw: String?): BridgeAccentTheme =
-            entries.firstOrNull { it.key == raw } ?: CRIMSON
+            entries.firstOrNull { it.key == raw } ?: LIQUID_BLUE
     }
 }
 
@@ -36,7 +37,7 @@ enum class ClipboardDirection(val key: String, val displayName: String) {
 }
 
 data class BridgePreferencesState(
-    val accentTheme: BridgeAccentTheme = BridgeAccentTheme.CRIMSON,
+    val accentTheme: BridgeAccentTheme = BridgeAccentTheme.LIQUID_BLUE,
     val compactMode: Boolean = false,
     val showTelemetryFooter: Boolean = true,
     val wifiCooldownSeconds: Int = 15,
@@ -126,7 +127,7 @@ class BridgePreferencesStore(
     private fun loadInitialState(): BridgePreferencesState {
         val defaultAlias = BridgePreferencesState.DEFAULT_DEVICE_ALIAS
         return BridgePreferencesState(
-            accentTheme = BridgeAccentTheme.fromKey(backend.getString(KEY_ACCENT_THEME, BridgeAccentTheme.CRIMSON.key)),
+            accentTheme = BridgeAccentTheme.fromKey(backend.getString(KEY_ACCENT_THEME, BridgeAccentTheme.LIQUID_BLUE.key)),
             compactMode = backend.getBoolean(KEY_COMPACT_MODE, false),
             showTelemetryFooter = backend.getBoolean(KEY_TELEMETRY_FOOTER, true),
             wifiCooldownSeconds = BridgePreferencesState.clampCooldown(backend.getInt(KEY_WIFI_COOLDOWN, 15)),

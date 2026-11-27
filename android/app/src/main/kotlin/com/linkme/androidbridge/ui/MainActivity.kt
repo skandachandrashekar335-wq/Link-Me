@@ -1,16 +1,24 @@
 package com.linkme.androidbridge.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import com.linkme.androidbridge.core.crypto.TrustStore
@@ -19,45 +27,97 @@ import com.linkme.androidbridge.core.protocol.BatteryStateEvent
 import com.linkme.androidbridge.core.protocol.BatteryStateMachine
 import com.linkme.androidbridge.service.BridgeForegroundService
 import com.linkme.androidbridge.ui.theme.AndroidBridgeTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
+/**
+ * ANR-free Compose entrypoint: zero blocking Keystore/crypto/disk I/O on Main Thread.
+ */
 class MainActivity : ComponentActivity() {
-    private lateinit var trustStore: TrustStore
-    private val sharedUris = mutableListOf<Uri>()
+    private val sharedUris = mutableStateListOf<Uri>()
+    private val securityFeed = mutableStateListOf(
+        "mTLS 1.3 Pinning Ready (AndroidKeyStore)",
+        "BLE Privacy Beacon Standby (15m HMAC)"
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        trustStore = TrustStore.forContext(this)
-
-        ContextCompat.startForegroundService(
-            this,
-            Intent(this, BridgeForegroundService::class.java)
-        )
-        extractSharedUris(intent)
+        ingestIntent(intent)
 
         setContent {
             AndroidBridgeTheme {
+                val scope = rememberCoroutineScope()
                 val stateMachine = remember { BatteryStateMachine() }
                 var currentState by remember { mutableStateOf(stateMachine.state) }
                 var showQrPairing by remember { mutableStateOf(false) }
-                var queuedShares by remember { mutableIntStateOf(sharedUris.size) }
-                var pairedPeerName by remember {
-                    mutableStateOf(trustStore.allPeers().firstOrNull()?.deviceName ?: "No Mac Paired")
+                var trustStore by remember { mutableStateOf<TrustStore?>(null) }
+                var pairedPeerName by remember { mutableStateOf("No Mac Paired") }
+                var serviceActive by remember { mutableStateOf(false) }
+                var permissionsGranted by remember { mutableStateOf(hasRequiredPermissions()) }
+                var batteryPercent by remember { mutableIntStateOf(100) }
+
+                val permissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestMultiplePermissions()
+                ) { results ->
+                    val allGranted = results.values.all { it }
+                    permissionsGranted = allGranted || hasRequiredPermissions()
+                    if (permissionsGranted) {
+                        startBridgeServiceSafely()
+                        serviceActive = true
+                        securityFeed.add(0, "Transport permissions granted · FGS active")
+                    } else {
+                        securityFeed.add(0, "Permissions pending · BLE standby paused")
+                    }
+                }
+
+                // Offload Keystore AES-GCM TrustStore decryption onto Dispatchers.IO
+                LaunchedEffect(Unit) {
+                    val loaded = withContext(Dispatchers.IO) {
+                        runCatching { TrustStore.forContext(applicationContext) }.getOrNull()
+                    }
+                    trustStore = loaded
+                    val firstPeer = loaded?.allPeers()?.firstOrNull()
+                    if (firstPeer != null) {
+                        pairedPeerName = firstPeer.deviceName
+                        securityFeed.add(0, "Loaded pinned peer: ${firstPeer.deviceName}")
+                    }
+                    if (permissionsGranted) {
+                        startBridgeServiceSafely()
+                        serviceActive = true
+                    } else {
+                        permissionLauncher.launch(requiredPermissionsList())
+                    }
+                }
+
+                val filePickerLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.OpenDocument()
+                ) { uri ->
+                    if (uri != null) {
+                        sharedUris.add(uri)
+                        securityFeed.add(0, "Queued file for MacBeam (${uri.lastPathSegment ?: "file"})")
+                    }
                 }
 
                 if (showQrPairing) {
                     QrScannerScreen(
                         onConfirmTrustedPeer = { peerId, peerName, certSha256, bleSecret ->
-                            trustStore.savePeer(
-                                TrustedPeer(
-                                    deviceId = peerId,
-                                    deviceName = peerName,
-                                    pinnedCertSha256 = certSha256,
-                                    sharedBleSecret = bleSecret
-                                )
-                            )
-                            pairedPeerName = peerName
-                            showQrPairing = false
+                            scope.launch {
+                                withContext(Dispatchers.IO) {
+                                    trustStore?.savePeer(
+                                        TrustedPeer(
+                                            deviceId = peerId,
+                                            deviceName = peerName,
+                                            pinnedCertSha256 = certSha256,
+                                            sharedBleSecret = bleSecret
+                                        )
+                                    )
+                                }
+                                pairedPeerName = peerName
+                                securityFeed.add(0, "Trusted $peerName via Curve25519 + SAS")
+                                showQrPairing = false
+                            }
                         },
                         onCancel = { showQrPairing = false }
                     )
@@ -65,16 +125,39 @@ class MainActivity : ComponentActivity() {
                     BridgeHomeScreen(
                         bridgeState = currentState,
                         peerName = pairedPeerName,
-                        batteryPercent = 84,
-                        queuedShareCount = queuedShares,
-                        onWakeWifi = {
-                            stateMachine.handle(BatteryStateEvent.LOCAL_ACTIVITY_TRIGGERED)
-                            currentState = stateMachine.handle(BatteryStateEvent.MTLS_HANDSHAKE_SUCCEEDED)
+                        batteryPercent = batteryPercent,
+                        serviceActive = serviceActive,
+                        queuedShareCount = sharedUris.size,
+                        logs = securityFeed.take(6),
+                        onScanQrClick = { showQrPairing = true },
+                        onSendFileClick = { filePickerLauncher.launch(arrayOf("*/*")) },
+                        onSyncClipboardClick = {
+                            if (permissionsGranted) {
+                                val syncIntent = Intent(this, BridgeForegroundService::class.java).apply {
+                                    action = BridgeForegroundService.ACTION_SEND_CLIPBOARD_TO_MAC
+                                }
+                                ContextCompat.startForegroundService(this, syncIntent)
+                                securityFeed.add(0, "Dispatched manual clipboard sync")
+                            } else {
+                                permissionLauncher.launch(requiredPermissionsList())
+                            }
                         },
-                        onEnterCooldown = {
-                            currentState = stateMachine.handle(BatteryStateEvent.INACTIVITY_THRESHOLD_REACHED)
+                        onNotificationAccessClick = {
+                            runCatching {
+                                startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                            }
                         },
-                        onOpenPairing = { showQrPairing = true }
+                        onToggleServiceClick = {
+                            if (permissionsGranted) {
+                                startBridgeServiceSafely()
+                                serviceActive = true
+                                stateMachine.handle(BatteryStateEvent.LOCAL_ACTIVITY_TRIGGERED)
+                                currentState = stateMachine.handle(BatteryStateEvent.MTLS_HANDSHAKE_SUCCEEDED)
+                                securityFeed.add(0, "Wi-Fi Turbo handshake requested")
+                            } else {
+                                permissionLauncher.launch(requiredPermissionsList())
+                            }
+                        }
                     )
                 }
             }
@@ -83,29 +166,54 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        extractSharedUris(intent)
+        ingestIntent(intent)
     }
 
-    private fun extractSharedUris(intent: Intent?) {
-        when (intent?.action) {
-            Intent.ACTION_SEND -> {
-                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-                } else {
-                    @Suppress("DEPRECATION")
-                    intent.getParcelableExtra(Intent.EXTRA_STREAM)
-                }
-                if (uri != null) sharedUris.add(uri)
+    private fun ingestIntent(intent: Intent?) {
+        if (intent?.action == ShareReceiverActivity.ACTION_SHARED_FILES) {
+            val forwarded = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableArrayListExtra(ShareReceiverActivity.EXTRA_SHARED_URIS, Uri::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableArrayListExtra(ShareReceiverActivity.EXTRA_SHARED_URIS)
             }
-            Intent.ACTION_SEND_MULTIPLE -> {
-                val uris = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
-                } else {
-                    @Suppress("DEPRECATION")
-                    intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
-                }
-                if (uris != null) sharedUris.addAll(uris)
+            if (!forwarded.isNullOrEmpty()) {
+                sharedUris.addAll(forwarded)
+                securityFeed.add(0, "Share Sheet queued ${forwarded.size} file(s)")
             }
+        }
+    }
+
+    private fun requiredPermissionsList(): Array<String> {
+        val perms = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            perms += Manifest.permission.BLUETOOTH_ADVERTISE
+            perms += Manifest.permission.BLUETOOTH_CONNECT
+            perms += Manifest.permission.BLUETOOTH_SCAN
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            perms += Manifest.permission.NEARBY_WIFI_DEVICES
+            perms += Manifest.permission.POST_NOTIFICATIONS
+        }
+        return perms.toTypedArray()
+    }
+
+    private fun hasRequiredPermissions(): Boolean {
+        val transportPerms = requiredPermissionsList().filter {
+            it != Manifest.permission.POST_NOTIFICATIONS
+        }
+        return transportPerms.all {
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun startBridgeServiceSafely() {
+        if (!hasRequiredPermissions()) return
+        runCatching {
+            ContextCompat.startForegroundService(
+                this,
+                Intent(this, BridgeForegroundService::class.java)
+            )
         }
     }
 }

@@ -19,6 +19,7 @@ import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import com.linkme.androidbridge.R
 import com.linkme.androidbridge.core.crypto.BlePrivacyBeacon
 import com.linkme.androidbridge.core.crypto.IdentityManager
 import com.linkme.androidbridge.core.crypto.TrustStore
@@ -35,175 +36,248 @@ import com.linkme.androidbridge.core.transport.TransferPriority
 import com.linkme.androidbridge.core.transport.TransportManager
 import com.linkme.androidbridge.core.transport.WifiTlsClient
 import com.linkme.androidbridge.core.transport.WifiTlsServer
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * connectedDevice ForegroundService wiring IdentityManager, Keystore-encrypted TrustStore,
- * BlePeripheralManager, on-demand WifiTlsServer, and all 5 continuity features.
+ * ANR-safe connectedDevice ForegroundService.
+ * Calls ServiceCompat.startForeground() immediately (< 5ms) with a lightweight cached notification
+ * and dispatches ALL Keystore, TrustStore, BLE, and socket initialization onto Dispatchers.IO.
  */
 class BridgeForegroundService : Service() {
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val json = Json { ignoreUnknownKeys = true }
+    private val initialized = AtomicBoolean(false)
 
-    private lateinit var identityManager: IdentityManager
-    private lateinit var trustStore: TrustStore
-    private lateinit var transportManager: TransportManager
-    private lateinit var clipboardSyncManager: ClipboardSyncManager
-    private lateinit var fileTransferManager: FileTransferManager
-    private lateinit var telemetryFeature: TelemetryFeature
+    private val cachedNotification: Notification by lazy {
+        buildNotification(BridgeState.DORMANT_BLE)
+    }
 
-    private var blePeripheralManager: BlePeripheralManager? = null
-    private var wifiTlsServer: WifiTlsServer? = null
-    private var wifiTlsClient: WifiTlsClient? = null
+    @Volatile private var identityManager: IdentityManager? = null
+    @Volatile private var trustStore: TrustStore? = null
+    @Volatile private var transportManager: TransportManager? = null
+    @Volatile private var clipboardSyncManager: ClipboardSyncManager? = null
+    @Volatile private var fileTransferManager: FileTransferManager? = null
+    @Volatile private var telemetryFeature: TelemetryFeature? = null
+    @Volatile private var blePeripheralManager: BlePeripheralManager? = null
+    @Volatile private var wifiTlsServer: WifiTlsServer? = null
+    @Volatile private var wifiTlsClient: WifiTlsClient? = null
+
     private var powerSaveReceiver: BroadcastReceiver? = null
     private var batteryReceiver: BroadcastReceiver? = null
 
     override fun onCreate() {
         super.onCreate()
         ensureNotificationChannel()
-        if (!hasRequiredTransportPermissions()) {
+        if (!enterForegroundSafely()) {
             stopSelf()
             return
         }
 
-        ServiceCompat.startForeground(
-            this,
-            NOTIFICATION_ID,
-            buildNotification(BridgeState.DORMANT_BLE),
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-            } else {
-                0
-            }
-        )
-
-        identityManager = IdentityManager(useAndroidKeyStore = true)
-        val localIdentity = identityManager.loadOrCreateIdentity()
-        trustStore = TrustStore.forContext(this)
-
-        val sysClipboard = getSystemService(ClipboardManager::class.java)
-        val clipAdapter = sysClipboard?.let { AndroidClipboardAdapter(it) }
-        fileTransferManager = FileTransferManager(File(cacheDir, "incoming_transfers"))
-        telemetryFeature = TelemetryFeature(localIdentity.deviceId)
-
-        transportManager = TransportManager(
-            bleSender = { frame -> blePeripheralManager?.sendControlFrame(frame) },
-            wifiOpener = { startOnDemandWifiServer() },
-            wifiSender = { frame -> wifiTlsClient?.send(frame) },
-            wifiCloser = { stopWifiTransport() }
-        )
-
-        clipboardSyncManager = ClipboardSyncManager(
-            deviceId = localIdentity.deviceId,
-            adapter = clipAdapter,
-            transport = transportManager
-        )
-
-        val pairedPeer = trustStore.allPeers().firstOrNull()
-        val beacon = pairedPeer?.let { BlePrivacyBeacon(it.sharedBleSecret) }
-        val peripheral = BlePeripheralManager(
-            context = this,
-            beacon = beacon,
-            onInboundFrame = { frame -> routeInboundFrame(frame) }
-        )
-        blePeripheralManager = peripheral
-
-        val powerMgr = getSystemService(PowerManager::class.java)
-        peripheral.setBatterySaverActive(powerMgr?.isPowerSaveMode == true)
-
-        val powerReceiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context, intent: Intent) {
-                if (intent.action == PowerManager.ACTION_POWER_SAVE_MODE_CHANGED) {
-                    val isSaver = context.getSystemService(PowerManager::class.java)?.isPowerSaveMode == true
-                    blePeripheralManager?.setBatterySaverActive(isSaver)
-                }
-            }
-        }
-        powerSaveReceiver = powerReceiver
-        registerReceiver(powerReceiver, IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED))
-
-        val battReceiver = telemetryFeature.createBatteryReceiver(
-            currentStateProvider = { transportManager.bridgeState },
-            onTelemetryReady = { telemetry ->
-                val payloadBytes = json.encodeToString(telemetry).toByteArray(Charsets.UTF_8)
-                transportManager.sendFrame(
-                    WireMessageType.PING_TELEMETRY,
-                    payloadBytes,
-                    TransferPriority.LOW_LATENCY_CONTROL,
-                    localIdentity.deviceId
-                )
-            }
-        )
-        batteryReceiver = battReceiver
-        registerReceiver(battReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-
-        BridgeNotificationListener.onNotificationEvent = { event ->
-            val bytes = json.encodeToString(event).toByteArray(Charsets.UTF_8)
-            transportManager.sendFrame(
-                WireMessageType.NOTIFICATION_EVENT,
-                bytes,
-                TransferPriority.LOW_LATENCY_CONTROL,
-                localIdentity.deviceId
-            )
-        }
-
-        onManualClipboardSyncRequested = {
-            val clipText = sysClipboard?.primaryClip?.getItemAt(0)?.text?.toString()
-            val sensitive = clipboardSyncManager.isSensitiveClip(sysClipboard?.primaryClipDescription?.extras)
-            if (!clipText.isNullOrEmpty()) {
-                clipboardSyncManager.processLocalCopy(clipText, sensitive)
-            }
+        // Offload ALL Keystore / crypto / BLE / receiver setup off the Main Thread
+        serviceScope.launch {
+            initializeAsync()
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_SEND_CLIPBOARD_TO_MAC -> onManualClipboardSyncRequested?.invoke()
-            ACTION_START_PAIRING_LISTENER -> startOnDemandWifiServer()
+        if (!enterForegroundSafely()) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        val action = intent?.action
+        if (action == ACTION_SEND_CLIPBOARD_TO_MAC || action == ACTION_START_PAIRING_LISTENER) {
+            serviceScope.launch {
+                runCatching {
+                    when (action) {
+                        ACTION_SEND_CLIPBOARD_TO_MAC -> onManualClipboardSyncRequested?.invoke()
+                        ACTION_START_PAIRING_LISTENER -> startOnDemandWifiServer()
+                    }
+                }
+            }
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
-        powerSaveReceiver?.let { runCatching { unregisterReceiver(it) } }
-        batteryReceiver?.let { runCatching { unregisterReceiver(it) } }
+        runCatching { powerSaveReceiver?.let { unregisterReceiver(it) } }
+        runCatching { batteryReceiver?.let { unregisterReceiver(it) } }
+        powerSaveReceiver = null
+        batteryReceiver = null
         BridgeNotificationListener.onNotificationEvent = null
         onManualClipboardSyncRequested = null
-        stopWifiTransport()
-        blePeripheralManager?.shutdown()
-        if (::transportManager.isInitialized) {
-            transportManager.shutdown()
-        }
+
+        runCatching { stopWifiTransport() }
+        runCatching { blePeripheralManager?.shutdown() }
+        runCatching { transportManager?.shutdown() }
+        serviceScope.cancel()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private fun enterForegroundSafely(): Boolean {
+        val hasPerms = hasRequiredTransportPermissions()
+        val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && hasPerms) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+        } else {
+            0
+        }
+        return runCatching {
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, cachedNotification, fgsType)
+            hasPerms
+        }.getOrDefault(false)
+    }
+
+    private fun initializeAsync() {
+        if (!initialized.compareAndSet(false, true)) return
+
+        runCatching {
+            val idMgr = IdentityManager(useAndroidKeyStore = true)
+            val localIdentity = idMgr.loadOrCreateIdentity()
+            val store = TrustStore.forContext(this)
+            val sysClipboard = getSystemService(ClipboardManager::class.java)
+            val clipAdapter = sysClipboard?.let { AndroidClipboardAdapter(it) }
+            val transferMgr = FileTransferManager(File(cacheDir, "incoming_transfers"))
+            val telemetry = TelemetryFeature(localIdentity.deviceId)
+
+            val transport = TransportManager(
+                bleSender = { frame -> blePeripheralManager?.sendControlFrame(frame) },
+                wifiOpener = { startOnDemandWifiServer() },
+                wifiSender = { frame -> wifiTlsClient?.send(frame) },
+                wifiCloser = { stopWifiTransport() }
+            )
+
+            val clipSync = ClipboardSyncManager(
+                deviceId = localIdentity.deviceId,
+                adapter = clipAdapter,
+                transport = transport
+            )
+
+            identityManager = idMgr
+            trustStore = store
+            fileTransferManager = transferMgr
+            telemetryFeature = telemetry
+            transportManager = transport
+            clipboardSyncManager = clipSync
+
+            val pairedPeer = store.allPeers().firstOrNull()
+            val beacon = pairedPeer?.let { BlePrivacyBeacon(it.sharedBleSecret) }
+            val peripheral = BlePeripheralManager(
+                context = this,
+                beacon = beacon,
+                onInboundFrame = { frame ->
+                    serviceScope.launch {
+                        runCatching { routeInboundFrame(frame) }
+                    }
+                }
+            )
+            blePeripheralManager = peripheral
+
+            val powerMgr = getSystemService(PowerManager::class.java)
+            peripheral.setBatterySaverActive(powerMgr?.isPowerSaveMode == true)
+
+            val powerReceiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent) {
+                    if (intent.action == PowerManager.ACTION_POWER_SAVE_MODE_CHANGED) {
+                        serviceScope.launch {
+                            runCatching {
+                                val isSaver = context.getSystemService(PowerManager::class.java)?.isPowerSaveMode == true
+                                blePeripheralManager?.setBatterySaverActive(isSaver)
+                            }
+                        }
+                    }
+                }
+            }
+            powerSaveReceiver = powerReceiver
+            registerReceiver(powerReceiver, IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED))
+
+            val battReceiver = telemetry.createBatteryReceiver(
+                currentStateProvider = { transport.bridgeState },
+                onTelemetryReady = { payload ->
+                    serviceScope.launch {
+                        runCatching {
+                            val bytes = json.encodeToString(payload).toByteArray(Charsets.UTF_8)
+                            transport.sendFrame(
+                                WireMessageType.PING_TELEMETRY,
+                                bytes,
+                                TransferPriority.LOW_LATENCY_CONTROL,
+                                localIdentity.deviceId
+                            )
+                        }
+                    }
+                }
+            )
+            batteryReceiver = battReceiver
+            registerReceiver(battReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+
+            BridgeNotificationListener.onNotificationEvent = { event ->
+                serviceScope.launch {
+                    runCatching {
+                        val bytes = json.encodeToString(event).toByteArray(Charsets.UTF_8)
+                        transport.sendFrame(
+                            WireMessageType.NOTIFICATION_EVENT,
+                            bytes,
+                            TransferPriority.LOW_LATENCY_CONTROL,
+                            localIdentity.deviceId
+                        )
+                    }
+                }
+            }
+
+            onManualClipboardSyncRequested = {
+                serviceScope.launch {
+                    runCatching {
+                        val clipText = sysClipboard?.primaryClip?.getItemAt(0)?.text?.toString()
+                        val sensitive = clipSync.isSensitiveClip(sysClipboard?.primaryClipDescription?.extras)
+                        if (!clipText.isNullOrEmpty()) {
+                            clipSync.processLocalCopy(clipText, sensitive)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private fun startOnDemandWifiServer(): Int {
         wifiTlsServer?.let { if (it.localPort > 0) return it.localPort }
-        val peerId = trustStore.allPeers().firstOrNull()?.deviceId ?: return 49152
+        val idMgr = identityManager ?: return 49152
+        val store = trustStore ?: return 49152
+        val peerId = store.allPeers().firstOrNull()?.deviceId ?: return 49152
+
         val server = WifiTlsServer(
-            identityManager = identityManager,
-            trustStore = trustStore,
+            identityManager = idMgr,
+            trustStore = store,
             expectedPeerDeviceId = peerId,
-            onFrameReceived = { frame -> routeInboundFrame(frame) }
+            onFrameReceived = { frame ->
+                serviceScope.launch { runCatching { routeInboundFrame(frame) } }
+            }
         )
         wifiTlsServer = server
         return server.start(0)
     }
 
     private fun stopWifiTransport() {
-        wifiTlsClient?.close()
-        wifiTlsClient = nilRef()
-        wifiTlsServer?.stop()
-        wifiTlsServer = nilRef()
+        runCatching { wifiTlsClient?.close() }
+        wifiTlsClient = null
+        runCatching { wifiTlsServer?.stop() }
+        wifiTlsServer = null
     }
 
-    @Suppress("UNCHECKED_CAST")
-    private fun <T> nilRef(): T? = null
-
     private fun routeInboundFrame(frame: WireFrame) {
+        val clipSync = clipboardSyncManager
+        val transferMgr = fileTransferManager
+        val transport = transportManager
+        val telemetry = telemetryFeature
+
         when (frame.messageType) {
             WireMessageType.WAKE_WIFI -> {
                 runCatching { json.decodeFromString<WakeWifiPayload>(frame.payload.decodeToString()) }
@@ -212,41 +286,45 @@ class BridgeForegroundService : Service() {
 
             WireMessageType.CLIPBOARD_SYNC -> {
                 runCatching { json.decodeFromString<ClipboardSyncPayload>(frame.payload.decodeToString()) }
-                    .onSuccess { clipboardSyncManager.applyRemoteClipboard(it) }
+                    .onSuccess { clipSync?.applyRemoteClipboard(it) }
             }
 
             WireMessageType.FILE_OFFER -> {
-                runCatching { json.decodeFromString<FileOfferPayload>(frame.payload.decodeToString()) }
-                    .onSuccess { offer ->
-                        val response = fileTransferManager.beginIncomingTransfer(offer)
-                        val respBytes = json.encodeToString(response).toByteArray(Charsets.UTF_8)
-                        transportManager.sendFrame(
-                            WireMessageType.FILE_RESPONSE,
-                            respBytes,
-                            TransferPriority.LOW_LATENCY_CONTROL
-                        )
-                    }
+                if (transferMgr != null && transport != null) {
+                    runCatching { json.decodeFromString<FileOfferPayload>(frame.payload.decodeToString()) }
+                        .onSuccess { offer ->
+                            val response = transferMgr.beginIncomingTransfer(offer)
+                            val respBytes = json.encodeToString(response).toByteArray(Charsets.UTF_8)
+                            transport.sendFrame(
+                                WireMessageType.FILE_RESPONSE,
+                                respBytes,
+                                TransferPriority.LOW_LATENCY_CONTROL
+                            )
+                        }
+                }
             }
 
             WireMessageType.FILE_CHUNK -> {
-                runCatching { FileChunkPacket.decode(frame.payload) }
-                    .onSuccess { packet ->
-                        val progress = fileTransferManager.receiveChunk(packet)
-                        if (progress.bytesTransferred >= progress.totalBytes) {
-                            val verifiedFile = fileTransferManager.finalizeIncomingTransfer(packet.transferId)
-                            fileTransferManager.exportToMediaStoreDownloads(
-                                this,
-                                verifiedFile,
-                                "application/octet-stream"
-                            )
+                if (transferMgr != null) {
+                    runCatching { FileChunkPacket.decode(frame.payload) }
+                        .onSuccess { packet ->
+                            val progress = transferMgr.receiveChunk(packet)
+                            if (progress.bytesTransferred >= progress.totalBytes) {
+                                val verifiedFile = transferMgr.finalizeIncomingTransfer(packet.transferId)
+                                transferMgr.exportToMediaStoreDownloads(
+                                    this,
+                                    verifiedFile,
+                                    "application/octet-stream"
+                                )
+                            }
                         }
-                    }
+                }
             }
 
             WireMessageType.DEVICE_COMMAND -> {
                 runCatching { json.decodeFromString<DeviceCommandPayload>(frame.payload.decodeToString()) }
                     .onSuccess { command ->
-                        telemetryFeature.handleDeviceCommand(this, command)
+                        telemetry?.handleDeviceCommand(this, command)
                         BridgeNotificationListener.activeInstance?.handleDeviceCommand(command)
                     }
             }
@@ -292,9 +370,9 @@ class BridgeForegroundService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Link-Me Bridge Active")
-            .setContentText("State: ${state.name}")
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            .setContentTitle("Link-Me Bridge")
+            .setContentText("Standby: ${state.name}")
+            .setSmallIcon(R.drawable.ic_stat_linkme)
             .addAction(0, "Send Clipboard to Mac", syncPendingIntent)
             .setOngoing(true)
             .build()

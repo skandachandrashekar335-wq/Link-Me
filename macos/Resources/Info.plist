@@ -6,6 +6,8 @@
     <string>$(DEVELOPMENT_LANGUAGE)</string>
     <key>CFBundleExecutable</key>
     <string>MacBridge</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.linkme.macbridge</string>
     <key>CFBundleInfoDictionaryVersion</key>

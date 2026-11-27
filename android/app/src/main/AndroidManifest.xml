@@ -83,19 +83,6 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 
-        <service
-            android:name=".service.RemoteControlAccessibilityService"
-            android:exported="true"
-            android:label="Link-Me Cursor Control"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/remote_control_accessibility" />
-        </service>
-
         <!-- Signature-verified IPC receiver for optional AndroidBridge-NotifyAddon APK -->
         <receiver
             android:name=".service.NotificationCompanionReceiver"

@@ -39,4 +39,20 @@ class AddonIpcContractTest {
         val huge = "x".repeat(300 * 1024)
         assertNull(AddonIpcContract.decodeCommand(huge))
     }
+
+    @Test
+    fun `decodes remote input gestures and clamps normalized coordinates`() {
+        val tapJson = """{"msgType":"REMOTE_INPUT","type":"tap","x":0.5,"y":0.25}"""
+        val decoded = AddonIpcContract.decodeRemoteInput(tapJson)
+        assertEquals("tap", decoded?.type)
+        assertEquals(0.5, decoded?.x ?: 0.0, 0.0001)
+
+        assertNull(AddonIpcContract.decodeRemoteInput(null))
+        assertNull(AddonIpcContract.decodeRemoteInput("invalid"))
+        assertNull(AddonIpcContract.decodeRemoteInput("x".repeat(300 * 1024)))
+
+        assertEquals(540f, AddonRemoteInputMapper.toPixel(0.5, 1080), 0.1f)
+        assertEquals(0f, AddonRemoteInputMapper.toPixel(-0.2, 1080), 0.1f)
+        assertEquals(2399f, AddonRemoteInputMapper.toPixel(1.2, 2400), 0.1f)
+    }
 }

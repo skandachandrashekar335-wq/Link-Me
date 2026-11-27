@@ -10,6 +10,11 @@ on:
         description: "Release tag name (e.g. v0.1.0)"
         required: true
         default: "v0.1.0"
+      android_only:
+        description: "Rebuild & replace ONLY Android APKs + SHA256SUMS.txt without touching DMG"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -17,6 +22,7 @@ permissions:
 jobs:
   build-macos-dmg:
     name: Build macOS DMG
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.android_only }}
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -79,7 +85,21 @@ jobs:
 
       - name: Assemble Release APKs (Core + Optional Notify Add-on)
         working-directory: android
-        run: ./gradlew :app:assembleRelease :notify-addon:assembleRelease --no-daemon
+        run: |
+          ./gradlew :app:testDebugUnitTest :notify-addon:testDebugUnitTest :app:assembleRelease :notify-addon:assembleRelease --no-daemon
+          MERGED_APP_MANIFEST="$(find app/build/intermediates/merged_manifests -path '*release*' -name 'AndroidManifest.xml' | head -n 1)"
+          test -n "$MERGED_APP_MANIFEST"
+          for perm in \
+            android.permission.BIND_ACCESSIBILITY_SERVICE \
+            android.permission.BIND_NOTIFICATION_LISTENER_SERVICE \
+            android.permission.BIND_DEVICE_ADMIN \
+            android.permission.REQUEST_INSTALL_PACKAGES \
+            android.permission.SYSTEM_ALERT_WINDOW; do
+            if grep -q "$perm" "$MERGED_APP_MANIFEST" app/src/main/AndroidManifest.xml; then
+              echo "ERROR: Play Protect restricted permission $perm found in :app release manifest!"
+              exit 1
+            fi
+          done
 
       - name: Align & Sign Release APKs (v1/v2/v3 with shared release key)
         run: |
@@ -91,6 +111,7 @@ jobs:
           BUILD_TOOLS_DIR="$(find "${ANDROID_HOME}/build-tools" -maxdepth 1 -mindepth 1 | sort -V | tail -n 1)"
           ZIPALIGN="${BUILD_TOOLS_DIR}/zipalign"
           APKSIGNER="${BUILD_TOOLS_DIR}/apksigner"
+          AAPT2="${BUILD_TOOLS_DIR}/aapt2"
 
           rm -f /tmp/release.keystore
           keytool -genkeypair -v -keystore /tmp/release.keystore \
@@ -123,6 +144,22 @@ jobs:
           sign_apk "$RAW_CORE_APK" "AndroidBridge-${TAG_NAME}.apk"
           sign_apk "$RAW_ADDON_APK" "AndroidBridge-NotifyAddon-${TAG_NAME}.apk"
 
+          "$AAPT2" dump xmltree "release-out/AndroidBridge-${TAG_NAME}.apk" --file AndroidManifest.xml > /tmp/core-apk-manifest.txt
+          "$AAPT2" dump permissions "release-out/AndroidBridge-${TAG_NAME}.apk" > /tmp/core-apk-perms.txt
+          cat /tmp/core-apk-perms.txt
+          for perm in \
+            android.permission.BIND_ACCESSIBILITY_SERVICE \
+            android.permission.BIND_NOTIFICATION_LISTENER_SERVICE \
+            android.permission.BIND_DEVICE_ADMIN \
+            android.permission.REQUEST_INSTALL_PACKAGES \
+            android.permission.SYSTEM_ALERT_WINDOW; do
+            if grep -q "$perm" /tmp/core-apk-manifest.txt /tmp/core-apk-perms.txt; then
+              echo "ERROR: Restricted permission $perm leaked into signed core APK!"
+              exit 1
+            fi
+          done
+          echo "Verified signed AndroidBridge-${TAG_NAME}.apk binary contains zero Play-Protect high-risk permissions."
+
           (cd release-out && sha256sum "AndroidBridge-${TAG_NAME}.apk" "AndroidBridge-NotifyAddon-${TAG_NAME}.apk" > SHA256SUMS.android.txt)
           ls -lh release-out/
 
@@ -136,6 +173,7 @@ jobs:
   publish-release:
     name: Publish GitHub Release
     needs: [build-macos-dmg, build-android-apk]
+    if: ${{ !cancelled() && needs.build-android-apk.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.android_only) || needs.build-macos-dmg.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -145,16 +183,31 @@ jobs:
           path: release-artifacts
 
       - name: Prepare Release Assets & SHA256SUMS.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          TAG_NAME="${{ github.event.inputs.tag || github.ref_name }}"
           mkdir -p release-files
-          cp release-artifacts/macos-release/MacBridge-*.dmg release-files/
           cp release-artifacts/android-release/AndroidBridge-*.apk release-files/
-          cat release-artifacts/macos-release/SHA256SUMS.macos.txt \
-              release-artifacts/android-release/SHA256SUMS.android.txt > release-files/SHA256SUMS.txt
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.android_only }}" = "true" ]; then
+            gh release download "$TAG_NAME" --repo "${{ github.repository }}" --pattern "MacBridge-${TAG_NAME}.dmg" --dir /tmp/existing-dmg
+            (cd /tmp/existing-dmg && sha256sum "MacBridge-${TAG_NAME}.dmg") > release-files/SHA256SUMS.macos.txt
+            cat release-files/SHA256SUMS.macos.txt \
+                release-artifacts/android-release/SHA256SUMS.android.txt > release-files/SHA256SUMS.txt
+            gh release upload "$TAG_NAME" --repo "${{ github.repository }}" \
+              release-files/AndroidBridge-*.apk \
+              release-files/SHA256SUMS.txt \
+              --clobber
+          else
+            cp release-artifacts/macos-release/MacBridge-*.dmg release-files/
+            cat release-artifacts/macos-release/SHA256SUMS.macos.txt \
+                release-artifacts/android-release/SHA256SUMS.android.txt > release-files/SHA256SUMS.txt
+          fi
           ls -lh release-files/
           cat release-files/SHA256SUMS.txt
 
       - uses: softprops/action-gh-release@v2
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.android_only }}
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |

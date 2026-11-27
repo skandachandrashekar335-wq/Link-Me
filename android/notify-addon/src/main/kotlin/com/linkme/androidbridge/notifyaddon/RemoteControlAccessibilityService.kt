@@ -1,25 +1,21 @@
-package com.linkme.androidbridge.service
+package com.linkme.androidbridge.notifyaddon
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
-import android.content.ComponentName
-import android.content.Context
 import android.graphics.Path
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.provider.Settings
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import com.linkme.androidbridge.core.protocol.RemoteInputPayload
 
 /**
  * Pure JVM-testable coordinate mapper clamping normalized [0.0, 1.0] mirror viewport coordinates
  * onto display pixel dimensions.
  */
-object RemoteInputCoordinateMapper {
+object AddonRemoteInputMapper {
     fun toPixel(normalized: Double, maxDimensionPx: Int): Float {
         if (maxDimensionPx <= 1) return 0f
         val clamped = normalized.coerceIn(0.0, 1.0)
@@ -28,8 +24,9 @@ object RemoteInputCoordinateMapper {
 }
 
 /**
- * Zero-root cursor, trackpad gesture, navigation, and text injection AccessibilityService
- * receiving 0x0E REMOTE_INPUT frames during macOS Screen Mirroring.
+ * Modular AccessibilityService hosted inside AndroidBridge-NotifyAddon so the primary APK stays
+ * Play-Protect clean (zero BIND_ACCESSIBILITY_SERVICE in core AndroidBridge manifest).
+ * Receives 0x0E REMOTE_INPUT commands exclusively via signature-verified MIRROR_IPC broadcasts.
  */
 class RemoteControlAccessibilityService : AccessibilityService() {
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -62,28 +59,28 @@ class RemoteControlAccessibilityService : AccessibilityService() {
         }
     }
 
-    fun executeRemoteInput(payload: RemoteInputPayload) {
+    fun executeRemoteInput(payload: RemoteInputIpcMessage) {
         mainHandler.post {
             val (screenW, screenH) = screenDimensions()
             when (payload.type.lowercase()) {
                 "tap" -> {
-                    val px = RemoteInputCoordinateMapper.toPixel(payload.x ?: return@post, screenW)
-                    val py = RemoteInputCoordinateMapper.toPixel(payload.y ?: return@post, screenH)
+                    val px = AddonRemoteInputMapper.toPixel(payload.x ?: return@post, screenW)
+                    val py = AddonRemoteInputMapper.toPixel(payload.y ?: return@post, screenH)
                     performStroke(px, py, px, py, durationMs = 45L)
                 }
 
                 "long_press" -> {
-                    val px = RemoteInputCoordinateMapper.toPixel(payload.x ?: return@post, screenW)
-                    val py = RemoteInputCoordinateMapper.toPixel(payload.y ?: return@post, screenH)
+                    val px = AddonRemoteInputMapper.toPixel(payload.x ?: return@post, screenW)
+                    val py = AddonRemoteInputMapper.toPixel(payload.y ?: return@post, screenH)
                     val dur = (payload.durationMs ?: 550).toLong().coerceIn(300L, 2500L)
                     performStroke(px, py, px, py, durationMs = dur)
                 }
 
                 "swipe" -> {
-                    val px1 = RemoteInputCoordinateMapper.toPixel(payload.x1 ?: return@post, screenW)
-                    val py1 = RemoteInputCoordinateMapper.toPixel(payload.y1 ?: return@post, screenH)
-                    val px2 = RemoteInputCoordinateMapper.toPixel(payload.x2 ?: return@post, screenW)
-                    val py2 = RemoteInputCoordinateMapper.toPixel(payload.y2 ?: return@post, screenH)
+                    val px1 = AddonRemoteInputMapper.toPixel(payload.x1 ?: return@post, screenW)
+                    val py1 = AddonRemoteInputMapper.toPixel(payload.y1 ?: return@post, screenH)
+                    val px2 = AddonRemoteInputMapper.toPixel(payload.x2 ?: return@post, screenW)
+                    val py2 = AddonRemoteInputMapper.toPixel(payload.y2 ?: return@post, screenH)
                     val dur = (payload.durationMs ?: 220).toLong().coerceIn(50L, 1200L)
                     performStroke(px1, py1, px2, py2, durationMs = dur)
                 }
@@ -129,17 +126,7 @@ class RemoteControlAccessibilityService : AccessibilityService() {
 
         fun isConnected(): Boolean = instance != null
 
-        fun isServiceEnabled(context: Context): Boolean {
-            if (instance != null) return true
-            val enabledServices = Settings.Secure.getString(
-                context.contentResolver,
-                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-            ).orEmpty()
-            val expected = ComponentName(context, RemoteControlAccessibilityService::class.java).flattenToString()
-            return enabledServices.split(':').any { it.equals(expected, ignoreCase = true) }
-        }
-
-        fun dispatchRemoteInput(payload: RemoteInputPayload): Boolean {
+        fun dispatchRemoteInput(payload: RemoteInputIpcMessage): Boolean {
             val active = instance ?: return false
             active.executeRemoteInput(payload)
             return true

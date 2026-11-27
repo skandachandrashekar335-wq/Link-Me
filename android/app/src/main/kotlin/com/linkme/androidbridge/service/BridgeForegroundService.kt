@@ -794,10 +794,17 @@ class BridgeForegroundService : Service() {
             WireMessageType.REMOTE_INPUT -> {
                 runCatching { json.decodeFromString<RemoteInputPayload>(frame.payload.decodeToString()) }
                     .onSuccess { input ->
-                        val executed = RemoteControlAccessibilityService.dispatchRemoteInput(input)
-                        if (!executed) {
-                            BridgeActivityHub.updateMirrorState {
-                                it.copy(statusText = "Remote input ignored: Enable Cursor Control (Accessibility) in Mirror tab")
+                        when (RemoteControlIpcBridge.dispatchRemoteInput(this, input)) {
+                            CursorControlAddonStatus.ACTIVE -> Unit
+                            CursorControlAddonStatus.COMPANION_NOT_INSTALLED -> {
+                                BridgeActivityHub.updateMirrorState {
+                                    it.copy(statusText = "View active • Install Companion Add-on for Remote Cursor Control")
+                                }
+                            }
+                            CursorControlAddonStatus.ACCESSIBILITY_DISABLED -> {
+                                BridgeActivityHub.updateMirrorState {
+                                    it.copy(statusText = "View active • Enable Link-Me Cursor Control in Accessibility settings")
+                                }
                             }
                         }
                     }

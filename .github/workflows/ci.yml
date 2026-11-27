@@ -55,4 +55,19 @@ jobs:
           yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
       - uses: gradle/actions/setup-gradle@v4
       - name: Run Unit Tests & Assemble Debug APKs
-        run: ./gradlew :app:testDebugUnitTest :notify-addon:testDebugUnitTest :app:assembleDebug :notify-addon:assembleDebug --no-daemon
+        run: |
+          ./gradlew :app:testDebugUnitTest :notify-addon:testDebugUnitTest :app:assembleDebug :notify-addon:assembleDebug --no-daemon
+          MERGED_APP_MANIFEST="$(find app/build/intermediates/merged_manifests -name 'AndroidManifest.xml' | head -n 1)"
+          test -n "$MERGED_APP_MANIFEST"
+          for perm in \
+            android.permission.BIND_ACCESSIBILITY_SERVICE \
+            android.permission.BIND_NOTIFICATION_LISTENER_SERVICE \
+            android.permission.BIND_DEVICE_ADMIN \
+            android.permission.REQUEST_INSTALL_PACKAGES \
+            android.permission.SYSTEM_ALERT_WINDOW; do
+            if grep -q "$perm" "$MERGED_APP_MANIFEST" app/src/main/AndroidManifest.xml; then
+              echo "ERROR: Play Protect restricted permission $perm found in :app manifest!"
+              exit 1
+            fi
+          done
+          echo "Verified :app manifest & merged manifest free of Play Protect high-risk permissions."

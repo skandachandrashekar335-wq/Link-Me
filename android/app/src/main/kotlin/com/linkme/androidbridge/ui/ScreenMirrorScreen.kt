@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -66,7 +67,8 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.linkme.androidbridge.service.BridgeActivityHub
-import com.linkme.androidbridge.service.RemoteControlAccessibilityService
+import com.linkme.androidbridge.service.CursorControlAddonStatus
+import com.linkme.androidbridge.service.RemoteControlIpcBridge
 import com.linkme.androidbridge.service.ScreenMirrorService
 import com.linkme.androidbridge.service.ScreenMirrorUiState
 import com.linkme.androidbridge.ui.theme.LocalBridgePalette
@@ -85,14 +87,14 @@ fun ScreenMirrorScreen(
     var zoomScale by remember { mutableFloatStateOf(1f) }
     var panOffset by remember { mutableStateOf(Offset.Zero) }
     var useCropFill by remember { mutableStateOf(false) }
-    var accessibilityEnabled by remember {
-        mutableStateOf(RemoteControlAccessibilityService.isServiceEnabled(context))
+    var cursorStatus by remember {
+        mutableStateOf(RemoteControlIpcBridge.inspectCursorStatus(context))
     }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                accessibilityEnabled = RemoteControlAccessibilityService.isServiceEnabled(context)
+                cursorStatus = RemoteControlIpcBridge.inspectCursorStatus(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -129,12 +131,13 @@ fun ScreenMirrorScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // 1-Tap Cursor Control Accessibility Banner
+        // Non-blocking Cursor Control Add-on / Accessibility Banner (viewing & casting stay active)
+        val cursorReady = cursorStatus == CursorControlAddonStatus.ACTIVE
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(18.dp),
             colors = CardDefaults.cardColors(containerColor = pal.surfaceLow),
-            border = BorderStroke(1.dp, if (accessibilityEnabled) pal.secondaryAccent else Color(0xFFFF9F0A))
+            border = BorderStroke(1.dp, if (cursorReady) pal.secondaryAccent else Color(0xFFFF9F0A))
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(14.dp),
@@ -147,41 +150,71 @@ fun ScreenMirrorScreen(
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(
-                        if (accessibilityEnabled) Icons.Rounded.CheckCircle else Icons.Rounded.AccessibilityNew,
+                        if (cursorReady) Icons.Rounded.CheckCircle else Icons.Rounded.AccessibilityNew,
                         contentDescription = null,
-                        tint = if (accessibilityEnabled) pal.secondaryAccent else Color(0xFFFF9F0A),
+                        tint = if (cursorReady) pal.secondaryAccent else Color(0xFFFF9F0A),
                         modifier = Modifier.size(22.dp)
                     )
                     Column(modifier = Modifier.padding(end = 8.dp)) {
                         Text(
-                            text = if (accessibilityEnabled) "Mac Cursor Control Ready" else "Enable Cursor Control (Accessibility)",
+                            text = when (cursorStatus) {
+                                CursorControlAddonStatus.ACTIVE -> "Mac Cursor Control Ready"
+                                CursorControlAddonStatus.COMPANION_NOT_INSTALLED -> "Install Companion Add-on for Remote Cursor Control"
+                                CursorControlAddonStatus.ACCESSIBILITY_DISABLED -> "Enable Cursor Control (Accessibility)"
+                            },
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = pal.onSurface
                         )
                         Text(
-                            text = if (accessibilityEnabled) {
-                                "Clicks, swipes & keyboard input from macOS Mirror work live."
-                            } else {
-                                "Grant Accessibility to control Android with your Mac mouse & keyboard."
+                            text = when (cursorStatus) {
+                                CursorControlAddonStatus.ACTIVE ->
+                                    "Clicks, swipes & keyboard input from macOS Mirror route live via Companion Add-on."
+                                CursorControlAddonStatus.COMPANION_NOT_INSTALLED ->
+                                    "Screen viewing & casting stay active now. Install AndroidBridge-NotifyAddon APK for remote cursor control."
+                                CursorControlAddonStatus.ACCESSIBILITY_DISABLED ->
+                                    "Grant Accessibility inside Companion Add-on to control Android with your Mac mouse & keyboard."
                             },
                             fontSize = 11.sp,
                             color = pal.secondaryText
                         )
                     }
                 }
-                if (!accessibilityEnabled) {
-                    Button(
-                        onClick = {
-                            runCatching {
-                                context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                            }
-                        },
-                        shape = CircleShape,
-                        colors = ButtonDefaults.buttonColors(containerColor = pal.primaryAccent)
-                    ) {
-                        Text("Enable", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                when (cursorStatus) {
+                    CursorControlAddonStatus.COMPANION_NOT_INSTALLED -> {
+                        OutlinedButton(
+                            onClick = {
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(
+                                            Intent.ACTION_VIEW,
+                                            Uri.parse("https://github.com/skandachandrashekar335-wq/Link-Me/releases")
+                                        )
+                                    )
+                                }
+                            },
+                            shape = CircleShape,
+                            border = BorderStroke(1.dp, pal.outlineVariant)
+                        ) {
+                            Text("Get Add-on", fontSize = 11.sp, color = pal.onSurface, fontWeight = FontWeight.SemiBold)
+                        }
                     }
+
+                    CursorControlAddonStatus.ACCESSIBILITY_DISABLED -> {
+                        Button(
+                            onClick = {
+                                runCatching {
+                                    context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                                }
+                            },
+                            shape = CircleShape,
+                            colors = ButtonDefaults.buttonColors(containerColor = pal.primaryAccent)
+                        ) {
+                            Text("Enable", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+
+                    CursorControlAddonStatus.ACTIVE -> Unit
                 }
             }
         }

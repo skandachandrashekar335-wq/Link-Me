@@ -1,0 +1,249 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://link-me.local/protocol/v1/schema.json",
+  "title": "Link-Me Control Protocol v1 Payloads",
+  "description": "Strict JSON schemas for all Link-Me v1 control message payloads.",
+  "oneOf": [
+    { "$ref": "#/$defs/PAIR_HELLO" },
+    { "$ref": "#/$defs/PING_TELEMETRY" },
+    { "$ref": "#/$defs/WAKE_WIFI" },
+    { "$ref": "#/$defs/CLIPBOARD_SYNC" },
+    { "$ref": "#/$defs/FILE_OFFER" },
+    { "$ref": "#/$defs/FILE_RESPONSE" },
+    { "$ref": "#/$defs/NOTIFICATION_EVENT" },
+    { "$ref": "#/$defs/DEVICE_COMMAND" }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "sha256Hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "base64Curve25519Key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9+/]{43}=$",
+      "minLength": 44,
+      "maxLength": 44
+    },
+    "bridgeState": {
+      "type": "string",
+      "enum": [
+        "DORMANT_BLE",
+        "HANDSHAKE_WAKE",
+        "ACTIVE_WIFI_STREAM",
+        "COOLDOWN_IDLE"
+      ]
+    },
+    "PAIR_HELLO": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "msgType",
+        "deviceId",
+        "deviceName",
+        "platform",
+        "ephemeralPublicKey",
+        "spkiSha256",
+        "protocolVersion",
+        "capabilities"
+      ],
+      "properties": {
+        "msgType": { "const": "PAIR_HELLO" },
+        "deviceId": { "$ref": "#/$defs/uuid" },
+        "deviceName": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "platform": { "type": "string", "enum": ["macos", "android"] },
+        "ephemeralPublicKey": { "$ref": "#/$defs/base64Curve25519Key" },
+        "spkiSha256": { "$ref": "#/$defs/sha256Hex" },
+        "protocolVersion": { "type": "integer", "const": 1 },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "clipboard",
+              "file_transfer",
+              "notifications",
+              "inline_reply",
+              "telemetry",
+              "ring"
+            ]
+          }
+        }
+      }
+    },
+    "PING_TELEMETRY": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "msgType",
+        "deviceId",
+        "batteryLevel",
+        "isCharging",
+        "batterySaverActive",
+        "transportState",
+        "timestampMs"
+      ],
+      "properties": {
+        "msgType": { "const": "PING_TELEMETRY" },
+        "deviceId": { "$ref": "#/$defs/uuid" },
+        "batteryLevel": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "isCharging": { "type": "boolean" },
+        "batterySaverActive": { "type": "boolean" },
+        "transportState": { "$ref": "#/$defs/bridgeState" },
+        "timestampMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "WAKE_WIFI": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "msgType",
+        "deviceId",
+        "servicePort",
+        "hostHints",
+        "bleTokenHex",
+        "reason",
+        "timestampMs"
+      ],
+      "properties": {
+        "msgType": { "const": "WAKE_WIFI" },
+        "deviceId": { "$ref": "#/$defs/uuid" },
+        "servicePort": { "type": "integer", "minimum": 1024, "maximum": 65535 },
+        "hostHints": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+        },
+        "bleTokenHex": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "reason": {
+          "type": "string",
+          "enum": ["clipboard", "file_transfer", "notification", "ring", "manual_sync"]
+        },
+        "timestampMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "CLIPBOARD_SYNC": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "msgType",
+        "originDeviceId",
+        "clipboardEpoch",
+        "contentSha256",
+        "mimeType",
+        "isSensitive",
+        "timestampMs"
+      ],
+      "properties": {
+        "msgType": { "const": "CLIPBOARD_SYNC" },
+        "originDeviceId": { "$ref": "#/$defs/uuid" },
+        "clipboardEpoch": { "type": "integer", "minimum": 1 },
+        "contentSha256": { "$ref": "#/$defs/sha256Hex" },
+        "mimeType": { "type": "string", "enum": ["text/plain", "image/png", "text/uri-list"] },
+        "text": { "type": "string", "maxLength": 1048576 },
+        "imageBase64": { "type": "string", "maxLength": 7340032 },
+        "isSensitive": { "type": "boolean", "const": false },
+        "timestampMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "FILE_OFFER": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "msgType",
+        "transferId",
+        "filename",
+        "byteSize",
+        "sha256",
+        "chunkSize",
+        "totalChunks",
+        "mimeType"
+      ],
+      "properties": {
+        "msgType": { "const": "FILE_OFFER" },
+        "transferId": { "$ref": "#/$defs/uuid" },
+        "filename": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^./\\\\\\u0000-\\u001f\\u007f][^/\\\\\\u0000-\\u001f\\u007f]*$"
+        },
+        "byteSize": { "type": "integer", "minimum": 1, "maximum": 10737418240 },
+        "sha256": { "$ref": "#/$defs/sha256Hex" },
+        "chunkSize": { "type": "integer", "minimum": 4096, "maximum": 262144 },
+        "totalChunks": { "type": "integer", "minimum": 1 },
+        "mimeType": { "type": "string", "minLength": 3, "maxLength": 127 }
+      }
+    },
+    "FILE_RESPONSE": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "msgType",
+        "transferId",
+        "accepted",
+        "resumeChunkIndex"
+      ],
+      "properties": {
+        "msgType": { "const": "FILE_RESPONSE" },
+        "transferId": { "$ref": "#/$defs/uuid" },
+        "accepted": { "type": "boolean" },
+        "resumeChunkIndex": { "type": "integer", "minimum": 0 },
+        "reason": { "type": "string", "maxLength": 256 }
+      }
+    },
+    "NOTIFICATION_EVENT": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "msgType",
+        "action",
+        "sbnKey",
+        "appName",
+        "packageName",
+        "title",
+        "body",
+        "timestampMs",
+        "canReply"
+      ],
+      "properties": {
+        "msgType": { "const": "NOTIFICATION_EVENT" },
+        "action": { "type": "string", "enum": ["POST", "DISMISS"] },
+        "sbnKey": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "appName": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "packageName": { "type": "string", "pattern": "^[a-zA-Z0-9_.]+$", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 256 },
+        "body": { "type": "string", "maxLength": 4096 },
+        "timestampMs": { "type": "integer", "minimum": 0 },
+        "canReply": { "type": "boolean" }
+      }
+    },
+    "DEVICE_COMMAND": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "msgType",
+        "command",
+        "timestampMs"
+      ],
+      "properties": {
+        "msgType": { "const": "DEVICE_COMMAND" },
+        "command": {
+          "type": "string",
+          "enum": ["replyToNotification", "dismissNotification", "ringPhone", "stopRing"]
+        },
+        "sbnKey": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "replyText": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "durationSeconds": { "type": "integer", "minimum": 1, "maximum": 120 },
+        "timestampMs": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

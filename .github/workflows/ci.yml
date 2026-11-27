@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  protocol-validation:
+    name: Protocol Schema & Vectors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate protocol JSON files
+        run: |
+          python3 -m json.tool protocol/schema.json > /dev/null
+          python3 -m json.tool protocol/test_vectors.json > /dev/null
+
+  macos-build-and-test:
+    name: macOS (MacBridge Swift 6)
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: macos
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift Build & Test
+        run: |
+          swift --version
+          swift test
+
+  android-build-and-test:
+    name: Android (AndroidBridge Gradle)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+      - name: Run Unit Tests & Assemble Debug APK
+        run: gradle testDebugUnitTest assembleDebug --no-daemon

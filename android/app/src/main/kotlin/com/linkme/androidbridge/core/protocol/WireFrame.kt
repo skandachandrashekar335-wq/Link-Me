@@ -18,8 +18,9 @@ enum class WireMessageType(val code: Byte) {
     OPEN_URL(0x0B),
     SCREEN_FRAME(0x0C),
     SCREEN_CONTROL(0x0D),
-    PAIR_COMMIT(0x0E),
-    PAIR_ACK(0x0F);
+    REMOTE_INPUT(0x0E),
+    PAIR_COMMIT(0x0F),
+    PAIR_ACK(0x10);
 
     companion object {
         fun fromByte(value: Byte): WireMessageType? = entries.firstOrNull { it.code == value }

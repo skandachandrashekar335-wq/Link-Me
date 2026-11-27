@@ -128,7 +128,7 @@ public actor PairingFeature {
             platform: "macos",
             spkiSha256: identity.certificateSha256Hex,
             accepted: true,
-            batteryLevel: battery.level,
+            batteryLevel: battery.level ?? 0,
             isCharging: battery.isCharging
         )
         return (peer, ack)
@@ -143,7 +143,7 @@ public actor PairingFeature {
             platform: "macos",
             spkiSha256: identity.certificateSha256Hex,
             accepted: true,
-            batteryLevel: battery.level,
+            batteryLevel: battery.level ?? 0,
             isCharging: battery.isCharging
         )
     }

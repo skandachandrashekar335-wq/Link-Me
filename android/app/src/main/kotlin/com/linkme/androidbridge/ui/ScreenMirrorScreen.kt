@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.media.projection.MediaProjectionManager
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -26,7 +27,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AccessibilityNew
 import androidx.compose.material.icons.rounded.Cast
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.FitScreen
 import androidx.compose.material.icons.rounded.LaptopMac
 import androidx.compose.material.icons.rounded.StopCircle
@@ -38,6 +41,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -53,12 +57,16 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.linkme.androidbridge.service.BridgeActivityHub
+import com.linkme.androidbridge.service.RemoteControlAccessibilityService
 import com.linkme.androidbridge.service.ScreenMirrorService
 import com.linkme.androidbridge.service.ScreenMirrorUiState
 import com.linkme.androidbridge.ui.theme.LocalBridgePalette
@@ -71,11 +79,25 @@ fun ScreenMirrorScreen(
     mirrorState: ScreenMirrorUiState
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val pal = LocalBridgePalette.current
 
     var zoomScale by remember { mutableFloatStateOf(1f) }
     var panOffset by remember { mutableStateOf(Offset.Zero) }
     var useCropFill by remember { mutableStateOf(false) }
+    var accessibilityEnabled by remember {
+        mutableStateOf(RemoteControlAccessibilityService.isServiceEnabled(context))
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                accessibilityEnabled = RemoteControlAccessibilityService.isServiceEnabled(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val projectionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -85,8 +107,8 @@ fun ScreenMirrorScreen(
                 action = ScreenMirrorService.ACTION_START
                 putExtra(ScreenMirrorService.EXTRA_RESULT_CODE, result.resultCode)
                 putExtra(ScreenMirrorService.EXTRA_RESULT_DATA, result.data)
-                putExtra(ScreenMirrorService.EXTRA_FPS, if (isWifiActive) 15 else 3)
-                putExtra(ScreenMirrorService.EXTRA_QUALITY, 55)
+                putExtra(ScreenMirrorService.EXTRA_FPS, if (isWifiActive) 24 else 3)
+                putExtra(ScreenMirrorService.EXTRA_QUALITY, 60)
             }
             ContextCompat.startForegroundService(context, svcIntent)
         }
@@ -107,7 +129,64 @@ fun ScreenMirrorScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // Controls Card
+        // 1-Tap Cursor Control Accessibility Banner
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = pal.surfaceLow),
+            border = BorderStroke(1.dp, if (accessibilityEnabled) pal.secondaryAccent else Color(0xFFFF9F0A))
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(14.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        if (accessibilityEnabled) Icons.Rounded.CheckCircle else Icons.Rounded.AccessibilityNew,
+                        contentDescription = null,
+                        tint = if (accessibilityEnabled) pal.secondaryAccent else Color(0xFFFF9F0A),
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Column(modifier = Modifier.padding(end = 8.dp)) {
+                        Text(
+                            text = if (accessibilityEnabled) "Mac Cursor Control Ready" else "Enable Cursor Control (Accessibility)",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = pal.onSurface
+                        )
+                        Text(
+                            text = if (accessibilityEnabled) {
+                                "Clicks, swipes & keyboard input from macOS Mirror work live."
+                            } else {
+                                "Grant Accessibility to control Android with your Mac mouse & keyboard."
+                            },
+                            fontSize = 11.sp,
+                            color = pal.secondaryText
+                        )
+                    }
+                }
+                if (!accessibilityEnabled) {
+                    Button(
+                        onClick = {
+                            runCatching {
+                                context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                            }
+                        },
+                        shape = CircleShape,
+                        colors = ButtonDefaults.buttonColors(containerColor = pal.primaryAccent)
+                    ) {
+                        Text("Enable", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        }
+
+        // Mirroring Controls Card
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(20.dp),
@@ -135,7 +214,7 @@ fun ScreenMirrorScreen(
                         )
                     }
                     Text(
-                        text = if (isWifiActive) "Wi-Fi TLS 1.3" else "BLE Preview",
+                        text = if (isWifiActive) "Wi-Fi TLS 1.3 (24 fps)" else "BLE Preview (3 fps)",
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
                         color = pal.secondaryText,
@@ -161,8 +240,8 @@ fun ScreenMirrorScreen(
                             }
                             BridgeActivityHub.onRequestRemoteScreenMirror?.invoke(
                                 nextStart,
-                                if (isWifiActive) 15 else 3,
-                                55
+                                if (isWifiActive) 24 else 3,
+                                60
                             )
                         },
                         enabled = isPaired,
@@ -224,11 +303,11 @@ fun ScreenMirrorScreen(
             }
         }
 
-        // Pinch-to-Zoom Interactive Mirror Viewport
+        // Pinch-to-Zoom Viewport
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(420.dp),
+                .height(400.dp),
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(containerColor = pal.surfaceLowest),
             border = BorderStroke(1.dp, pal.outlineVariant)

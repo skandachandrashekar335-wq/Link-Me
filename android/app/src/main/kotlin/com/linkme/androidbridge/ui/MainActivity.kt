@@ -169,7 +169,7 @@ class MainActivity : ComponentActivity() {
                     isPaired = isPaired,
                     isBluetoothConnected = isBluetoothConnected,
                     isWifiActive = isWifiActive,
-                    batteryPercent = localBatteryPercent ?: initialBattery.level,
+                    batteryPercent = localBatteryPercent,
                     isCharging = localIsCharging,
                     peerBatteryPercent = peerBatteryPercent,
                     peerIsCharging = peerIsCharging,

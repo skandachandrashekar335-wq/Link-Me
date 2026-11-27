@@ -20,6 +20,7 @@ import com.linkme.androidbridge.core.protocol.PairAckPayload
 import com.linkme.androidbridge.core.protocol.PairCommitPayload
 import com.linkme.androidbridge.core.protocol.PairHelloPayload
 import com.linkme.androidbridge.core.protocol.PairingCommitMac
+import com.linkme.androidbridge.core.protocol.RemoteInputPayload
 import com.linkme.androidbridge.core.protocol.ScreenControlPayload
 import com.linkme.androidbridge.core.protocol.ScreenFramePacket
 import com.linkme.androidbridge.core.protocol.WireFrame
@@ -33,6 +34,7 @@ import com.linkme.androidbridge.core.transport.TransportManager
 import com.linkme.androidbridge.core.transport.WifiTlsClient
 import com.linkme.androidbridge.core.transport.WifiTlsServer
 import com.linkme.androidbridge.service.FileTransferManager
+import com.linkme.androidbridge.service.RemoteInputCoordinateMapper
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertArrayEquals
@@ -488,11 +490,11 @@ class TransportAndLoopbackTest {
         assertTrue(decodedAck.accepted)
         assertEquals(88, decodedAck.batteryLevel)
 
-        // Screen Mirroring 0x0D SCREEN_CONTROL + 0x0C SCREEN_FRAME round-trip over ChaCha20
+        // Screen Mirroring 0x0D SCREEN_CONTROL + 0x0C SCREEN_FRAME + 0x0E REMOTE_INPUT over ChaCha20
         val androidCipher = BluetoothSessionCipher(androidDerived.sessionKey, senderTag = "AND0")
         val macCipher = BluetoothSessionCipher(macDerived.sessionKey, senderTag = "MAC0")
 
-        val ctrl = ScreenControlPayload(action = "start", source = "macos", fps = 15, quality = 60)
+        val ctrl = ScreenControlPayload(action = "start", source = "android", fps = 24, quality = 60)
         val ctrlFrame = WireFrame(WireMessageType.SCREEN_CONTROL, 20L, Json.encodeToString(ctrl).toByteArray())
         val decodedCtrl = Json.decodeFromString<ScreenControlPayload>(
             macCipher.openFrame(androidCipher.seal(ctrlFrame)).payload.decodeToString()
@@ -502,11 +504,36 @@ class TransportAndLoopbackTest {
         val jpegPayload = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte()) +
             ByteArray(2048) { (it and 0xFF).toByte() } +
             byteArrayOf(0xFF.toByte(), 0xD9.toByte())
-        val pkt = ScreenFramePacket(width = 1280, height = 720, timestampMs = 1_770_000_555_000L, jpegData = jpegPayload)
+        val pkt = ScreenFramePacket(
+            source = ScreenFramePacket.SOURCE_ANDROID,
+            width = 540,
+            height = 1200,
+            timestampMs = 1_770_000_555_000L,
+            jpegData = jpegPayload
+        )
         val frame = WireFrame(WireMessageType.SCREEN_FRAME, 21L, pkt.encode())
         val decodedPkt = ScreenFramePacket.decode(androidCipher.openFrame(macCipher.seal(frame)).payload)
         assertEquals(pkt, decodedPkt)
-        assertEquals(1280, decodedPkt.width)
-        assertEquals(720, decodedPkt.height)
+        assertEquals(ScreenFramePacket.SOURCE_ANDROID, decodedPkt.source)
+        assertEquals(540, decodedPkt.width)
+        assertEquals(1200, decodedPkt.height)
+
+        val inputs = listOf(
+            RemoteInputPayload(type = "tap", x = 0.52, y = 0.41),
+            RemoteInputPayload(type = "swipe", x1 = 0.5, y1 = 0.8, x2 = 0.5, y2 = 0.2, durationMs = 220),
+            RemoteInputPayload(type = "long_press", x = 0.52, y = 0.41, durationMs = 550),
+            RemoteInputPayload(type = "key", action = "back"),
+            RemoteInputPayload(type = "key", action = "text", text = "Hello Android")
+        )
+        inputs.forEachIndexed { idx, input ->
+            val inFrame = WireFrame(WireMessageType.REMOTE_INPUT, 30L + idx, Json.encodeToString(input).toByteArray())
+            val rx = Json.decodeFromString<RemoteInputPayload>(
+                androidCipher.openFrame(macCipher.seal(inFrame)).payload.decodeToString()
+            )
+            assertEquals(input, rx)
+        }
+        assertEquals(540f, RemoteInputCoordinateMapper.toPixel(0.5, 1080), 0.1f)
+        assertEquals(0f, RemoteInputCoordinateMapper.toPixel(-0.5, 1080), 0.1f)
+        assertEquals(2399f, RemoteInputCoordinateMapper.toPixel(1.5, 2400), 0.1f)
     }
 }

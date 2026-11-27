@@ -71,8 +71,8 @@ class ScreenMirrorService : Service() {
             @Suppress("DEPRECATION")
             intent?.getParcelableExtra(EXTRA_RESULT_DATA)
         }
-        targetFps = (intent?.getIntExtra(EXTRA_FPS, 12) ?: 12).coerceIn(1, 30)
-        jpegQuality = (intent?.getIntExtra(EXTRA_QUALITY, 55) ?: 55).coerceIn(25, 90)
+        targetFps = (intent?.getIntExtra(EXTRA_FPS, 24) ?: 24).coerceIn(1, 30)
+        jpegQuality = (intent?.getIntExtra(EXTRA_QUALITY, 60) ?: 60).coerceIn(25, 90)
 
         if (resultCode != Activity.RESULT_OK || resultData == null) {
             stopCaptureAndSelf()
@@ -108,7 +108,7 @@ class ScreenMirrorService : Service() {
         val metrics = resources.displayMetrics
         val srcW = metrics.widthPixels.coerceAtLeast(360)
         val srcH = metrics.heightPixels.coerceAtLeast(640)
-        val maxEdge = 720
+        val maxEdge = if (BridgeActivityHub.wifiConnected.value) 720 else 540
         val scale = minOf(1f, maxEdge.toFloat() / minOf(srcW, srcH).toFloat())
         val outW = (srcW * scale).toInt().coerceAtLeast(320)
         val outH = (srcH * scale).toInt().coerceAtLeast(320)

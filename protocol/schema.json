@@ -16,7 +16,8 @@
     { "$ref": "#/$defs/OPEN_URL" },
     { "$ref": "#/$defs/PAIR_COMMIT" },
     { "$ref": "#/$defs/PAIR_ACK" },
-    { "$ref": "#/$defs/SCREEN_CONTROL" }
+    { "$ref": "#/$defs/SCREEN_CONTROL" },
+    { "$ref": "#/$defs/REMOTE_INPUT" }
   ],
   "$defs": {
     "uuid": {
@@ -337,6 +338,23 @@
         "source": { "type": "string", "enum": ["macos", "android"] },
         "fps": { "type": "integer", "minimum": 1, "maximum": 30 },
         "quality": { "type": "integer", "minimum": 20, "maximum": 95 }
+      }
+    },
+    "REMOTE_INPUT": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "enum": ["tap", "swipe", "long_press", "key"] },
+        "x": { "type": "number", "minimum": 0, "maximum": 1 },
+        "y": { "type": "number", "minimum": 0, "maximum": 1 },
+        "x1": { "type": "number", "minimum": 0, "maximum": 1 },
+        "y1": { "type": "number", "minimum": 0, "maximum": 1 },
+        "x2": { "type": "number", "minimum": 0, "maximum": 1 },
+        "y2": { "type": "number", "minimum": 0, "maximum": 1 },
+        "durationMs": { "type": "integer", "minimum": 20, "maximum": 5000 },
+        "action": { "type": "string", "enum": ["back", "home", "recents", "text"] },
+        "text": { "type": "string", "maxLength": 4096 }
       }
     }
   }

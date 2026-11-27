@@ -110,7 +110,7 @@ fun BridgeHomeScreen(
     isPaired: Boolean,
     isBluetoothConnected: Boolean,
     isWifiActive: Boolean,
-    batteryPercent: Int,
+    batteryPercent: Int?,
     isCharging: Boolean,
     peerBatteryPercent: Int?,
     peerIsCharging: Boolean,
@@ -421,7 +421,7 @@ private fun HomeTabContent(
     isPaired: Boolean,
     isBluetoothConnected: Boolean,
     isWifiActive: Boolean,
-    batteryPercent: Int,
+    batteryPercent: Int?,
     isCharging: Boolean,
     peerBatteryPercent: Int?,
     peerIsCharging: Boolean,
@@ -524,9 +524,10 @@ private fun HomeTabContent(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                val localBattLabel = batteryPercent?.let { "$it%${if (isCharging) "+" else ""}" } ?: "--"
                 val macBattLabel = peerBatteryPercent?.let { "$it%${if (peerIsCharging) "+" else ""}" } ?: "--"
                 Text(
-                    text = "Phone $batteryPercent%${if (isCharging) "+" else ""} • Mac $macBattLabel",
+                    text = "Phone $localBattLabel • Mac $macBattLabel",
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                     color = pal.secondaryText

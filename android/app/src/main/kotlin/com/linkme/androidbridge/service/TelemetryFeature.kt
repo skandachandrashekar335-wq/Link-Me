@@ -21,14 +21,14 @@ import com.linkme.androidbridge.core.protocol.PingTelemetryPayload
 import kotlin.math.abs
 
 data class BatterySnapshot(
-    val level: Int,
+    val level: Int?,
     val isCharging: Boolean,
     val batterySaverActive: Boolean
 )
 
 /**
  * Feature 5: Emits PING_TELEMETRY on >= 2% battery delta, charging change, connect, or 60s pulse,
- * reads real BatteryManager levels, and handles "Find My Phone" Ring commands.
+ * reads real BatteryManager + ACTION_BATTERY_CHANGED levels, and handles "Find My Phone" Ring commands.
  */
 class TelemetryFeature(
     private val deviceId: String
@@ -49,9 +49,9 @@ class TelemetryFeature(
         val stickyPct = sticky?.let { intent ->
             val lvl = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
             val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100).coerceAtLeast(1)
-            if (lvl >= 0) (lvl * 100) / scale else null
+            if (lvl >= 0) ((lvl * 100) / scale).coerceIn(0, 100) else null
         }
-        val level = (propCap ?: stickyPct ?: 100).coerceIn(0, 100)
+        val level = stickyPct ?: propCap
 
         val stickyStatus = sticky?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
         val isCharging = bm?.isCharging == true ||
@@ -66,13 +66,14 @@ class TelemetryFeature(
         context: Context,
         transportState: BridgeState,
         timestampMs: Long = System.currentTimeMillis()
-    ): PingTelemetryPayload {
+    ): PingTelemetryPayload? {
         val snap = readCurrentBattery(context)
-        lastReportedLevel = snap.level
+        val realLevel = snap.level ?: return null
+        lastReportedLevel = realLevel
         lastChargingState = snap.isCharging
         return PingTelemetryPayload(
             deviceId = deviceId,
-            batteryLevel = snap.level,
+            batteryLevel = realLevel,
             isCharging = snap.isCharging,
             batterySaverActive = snap.batterySaverActive,
             transportState = transportState,

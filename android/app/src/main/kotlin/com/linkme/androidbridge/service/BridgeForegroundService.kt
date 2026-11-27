@@ -36,6 +36,7 @@ import com.linkme.androidbridge.core.protocol.OpenUrlPayload
 import com.linkme.androidbridge.core.protocol.PairAckPayload
 import com.linkme.androidbridge.core.protocol.PairCommitPayload
 import com.linkme.androidbridge.core.protocol.PingTelemetryPayload
+import com.linkme.androidbridge.core.protocol.RemoteInputPayload
 import com.linkme.androidbridge.core.protocol.ScreenControlPayload
 import com.linkme.androidbridge.core.protocol.ScreenFramePacket
 import com.linkme.androidbridge.core.protocol.WakeWifiPayload
@@ -449,7 +450,13 @@ class BridgeForegroundService : Service() {
             BridgeActivityHub.onSendScreenFrameBytes = { width, height, timestampMs, jpegBytes ->
                 serviceScope.launch {
                     runCatching {
-                        val packet = ScreenFramePacket(width, height, timestampMs, jpegBytes)
+                        val packet = ScreenFramePacket(
+                            source = ScreenFramePacket.SOURCE_ANDROID,
+                            width = width,
+                            height = height,
+                            timestampMs = timestampMs,
+                            jpegData = jpegBytes
+                        )
                         val frame = transport.makeFrame(WireMessageType.SCREEN_FRAME, packet.encode())
                         transport.sendResilientFrame(frame, preferBle = false)
                     }
@@ -773,6 +780,18 @@ class BridgeForegroundService : Service() {
                     }
             }
 
+            WireMessageType.REMOTE_INPUT -> {
+                runCatching { json.decodeFromString<RemoteInputPayload>(frame.payload.decodeToString()) }
+                    .onSuccess { input ->
+                        val executed = RemoteControlAccessibilityService.dispatchRemoteInput(input)
+                        if (!executed) {
+                            BridgeActivityHub.updateMirrorState {
+                                it.copy(statusText = "Remote input ignored: Enable Cursor Control (Accessibility) in Mirror tab")
+                            }
+                        }
+                    }
+            }
+
             WireMessageType.DEVICE_COMMAND -> {
                 runCatching { json.decodeFromString<DeviceCommandPayload>(frame.payload.decodeToString()) }
                     .onSuccess { command ->
@@ -863,7 +882,7 @@ class BridgeForegroundService : Service() {
     private fun emitImmediateTelemetry() {
         val telemetry = telemetryFeature ?: return
         val transport = transportManager ?: return
-        val payload = telemetry.buildSnapshotPayload(this, transport.bridgeState)
+        val payload = telemetry.buildSnapshotPayload(this, transport.bridgeState) ?: return
         BridgeActivityHub.updateLocalBattery(payload.batteryLevel, payload.isCharging)
         val bytes = json.encodeToString(payload).toByteArray(Charsets.UTF_8)
         val frame = transport.makeFrame(WireMessageType.PING_TELEMETRY, bytes)

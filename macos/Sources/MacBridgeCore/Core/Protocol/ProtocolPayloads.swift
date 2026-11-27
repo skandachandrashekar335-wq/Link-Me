@@ -430,7 +430,7 @@ public struct ScreenControlPayload: Codable, Sendable, Equatable {
     public let fps: Int
     public let quality: Int
 
-    public init(action: String, source: String, fps: Int = 15, quality: Int = 60) {
+    public init(action: String, source: String, fps: Int = 24, quality: Int = 60) {
         self.action = action
         self.source = source
         self.fps = min(30, max(1, fps))
@@ -438,21 +438,35 @@ public struct ScreenControlPayload: Codable, Sendable, Equatable {
     }
 }
 
+public enum ScreenFrameSource: UInt8, Codable, Sendable {
+    case android = 1
+    case macos = 2
+}
+
 /// Binary payload layout for 0x0C SCREEN_FRAME:
-/// 2B width BE + 2B height BE + 8B timestampMs BE + JPEG compressed image bytes.
+/// 1B source (1=Android, 2=macOS) + 2B width BE + 2B height BE + 8B timestampMs BE + JPEG compressed image bytes.
 public struct ScreenFramePacket: Sendable, Equatable {
-    public static let headerSize = 12
+    public static let headerSize = 13
     public static let maxJpegBytes = Int(WireFrame.maxControlFrameBytes) - headerSize
 
+    public let source: UInt8
     public let width: UInt16
     public let height: UInt16
     public let timestampMs: UInt64
     public let jpegData: Data
 
-    public init(width: UInt16, height: UInt16, timestampMs: UInt64, jpegData: Data) throws {
-        guard width > 0, height > 0, !jpegData.isEmpty, jpegData.count <= Self.maxJpegBytes else {
+    public init(
+        source: UInt8 = ScreenFrameSource.macos.rawValue,
+        width: UInt16,
+        height: UInt16,
+        timestampMs: UInt64,
+        jpegData: Data
+    ) throws {
+        guard (source == 1 || source == 2),
+              width > 0, height > 0, !jpegData.isEmpty, jpegData.count <= Self.maxJpegBytes else {
             throw ProtocolPayloadError.invalidFileChunk
         }
+        self.source = source
         self.width = width
         self.height = height
         self.timestampMs = timestampMs
@@ -461,6 +475,7 @@ public struct ScreenFramePacket: Sendable, Equatable {
 
     public func encode() -> Data {
         var out = Data(capacity: Self.headerSize + jpegData.count)
+        out.append(source)
         var wBE = width.bigEndian
         withUnsafeBytes(of: &wBE) { out.append(contentsOf: $0) }
         var hBE = height.bigEndian
@@ -476,10 +491,65 @@ public struct ScreenFramePacket: Sendable, Equatable {
             throw ProtocolPayloadError.invalidFileChunk
         }
         let s = payload.startIndex
-        let w = (UInt16(payload[s]) << 8) | UInt16(payload[s + 1])
-        let h = (UInt16(payload[s + 2]) << 8) | UInt16(payload[s + 3])
-        let ts = FrameDecoder.readUInt64BE(payload, offset: 4)
+        let src = payload[s]
+        let w = (UInt16(payload[s + 1]) << 8) | UInt16(payload[s + 2])
+        let h = (UInt16(payload[s + 3]) << 8) | UInt16(payload[s + 4])
+        let ts = FrameDecoder.readUInt64BE(payload, offset: 5)
         let jpeg = Data(payload[(s + headerSize)..<payload.endIndex])
-        return try ScreenFramePacket(width: w, height: h, timestampMs: ts, jpegData: jpeg)
+        return try ScreenFramePacket(source: src, width: w, height: h, timestampMs: ts, jpegData: jpeg)
+    }
+}
+
+/// Interactive Mac-to-Android cursor/keyboard control event (0x0E REMOTE_INPUT).
+public struct RemoteInputPayload: Codable, Sendable, Equatable {
+    public let type: String        // "tap" | "swipe" | "long_press" | "key"
+    public let x: Double?
+    public let y: Double?
+    public let x1: Double?
+    public let y1: Double?
+    public let x2: Double?
+    public let y2: Double?
+    public let durationMs: Int?
+    public let action: String?     // "back" | "home" | "recents" | "text"
+    public let text: String?
+
+    public init(
+        type: String,
+        x: Double? = nil,
+        y: Double? = nil,
+        x1: Double? = nil,
+        y1: Double? = nil,
+        x2: Double? = nil,
+        y2: Double? = nil,
+        durationMs: Int? = nil,
+        action: String? = nil,
+        text: String? = nil
+    ) {
+        self.type = type
+        self.x = x.map { min(1.0, max(0.0, $0)) }
+        self.y = y.map { min(1.0, max(0.0, $0)) }
+        self.x1 = x1.map { min(1.0, max(0.0, $0)) }
+        self.y1 = y1.map { min(1.0, max(0.0, $0)) }
+        self.x2 = x2.map { min(1.0, max(0.0, $0)) }
+        self.y2 = y2.map { min(1.0, max(0.0, $0)) }
+        self.durationMs = durationMs
+        self.action = action
+        self.text = text
+    }
+
+    public static func tap(x: Double, y: Double) -> RemoteInputPayload {
+        RemoteInputPayload(type: "tap", x: x, y: y)
+    }
+
+    public static func longPress(x: Double, y: Double, durationMs: Int = 550) -> RemoteInputPayload {
+        RemoteInputPayload(type: "long_press", x: x, y: y, durationMs: durationMs)
+    }
+
+    public static func swipe(x1: Double, y1: Double, x2: Double, y2: Double, durationMs: Int = 220) -> RemoteInputPayload {
+        RemoteInputPayload(type: "swipe", x1: x1, y1: y1, x2: x2, y2: y2, durationMs: durationMs)
+    }
+
+    public static func key(_ action: String, text: String? = nil) -> RemoteInputPayload {
+        RemoteInputPayload(type: "key", action: action, text: text)
     }
 }

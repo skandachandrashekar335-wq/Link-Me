@@ -409,25 +409,49 @@ struct TransportAndLoopbackTests {
         #expect(try macTrust.peer(forDeviceId: androidIdentity.deviceId)?.bluetoothSessionKey == derived.sessionKey)
         #expect(ack.accepted == true)
         #expect((0...100).contains(ack.batteryLevel))
-        #expect((0...100).contains(MacBatteryMonitor.readBattery().level))
+        let localBatt = MacBatteryMonitor.readBattery()
+        if let lvl = localBatt.level {
+            #expect((0...100).contains(lvl))
+        }
 
-        // Screen Mirroring 0x0D SCREEN_CONTROL + 0x0C SCREEN_FRAME round-trip over encrypted Bluetooth cipher
+        // Screen Mirroring 0x0D SCREEN_CONTROL + 0x0C SCREEN_FRAME + 0x0E REMOTE_INPUT over ChaCha20
         let cipherMac = try BluetoothSessionCipher(sessionKey: derived.sessionKey, senderTag: "MAC0")
         let cipherAndroid = try BluetoothSessionCipher(sessionKey: derived.sessionKey, senderTag: "AND0")
 
-        let ctrl = ScreenControlPayload(action: "start", source: "macos", fps: 15, quality: 55)
+        let ctrl = ScreenControlPayload(action: "start", source: "android", fps: 24, quality: 60)
         let ctrlFrame = try WireFrame(messageType: .screenControl, sequenceId: 101, payload: JSONEncoder().encode(ctrl))
         let rxCtrl = try cipherMac.openFrame(from: try cipherAndroid.seal(frame: ctrlFrame))
         let decodedCtrl = try JSONDecoder().decode(ScreenControlPayload.self, from: rxCtrl.payload)
         #expect(decodedCtrl == ctrl)
 
         let fakeJpeg = Data([0xFF, 0xD8, 0xFF, 0xE0]) + Data((0..<4096).map { UInt8($0 & 0xFF) }) + Data([0xFF, 0xD9])
-        let screenPkt = try ScreenFramePacket(width: 1280, height: 720, timestampMs: 1_770_000_123_000, jpegData: fakeJpeg)
+        let screenPkt = try ScreenFramePacket(
+            source: ScreenFrameSource.android.rawValue,
+            width: 540,
+            height: 1200,
+            timestampMs: 1_770_000_123_000,
+            jpegData: fakeJpeg
+        )
         let screenFrame = try WireFrame(messageType: .screenFrame, sequenceId: 102, payload: screenPkt.encode())
         let rxScreen = try cipherAndroid.openFrame(from: try cipherMac.seal(frame: screenFrame))
         let decodedPkt = try ScreenFramePacket.decode(from: rxScreen.payload)
         #expect(decodedPkt == screenPkt)
-        #expect(decodedPkt.width == 1280)
-        #expect(decodedPkt.height == 720)
+        #expect(decodedPkt.source == ScreenFrameSource.android.rawValue)
+        #expect(decodedPkt.width == 540)
+        #expect(decodedPkt.height == 1200)
+
+        let inputs: [RemoteInputPayload] = [
+            .tap(x: 0.52, y: 0.41),
+            .swipe(x1: 0.5, y1: 0.8, x2: 0.5, y2: 0.2, durationMs: 220),
+            .longPress(x: 0.52, y: 0.41, durationMs: 550),
+            .key("back"),
+            .key("text", text: "Hello Pixel")
+        ]
+        for (idx, input) in inputs.enumerated() {
+            let f = try WireFrame(messageType: .remoteInput, sequenceId: UInt64(200 + idx), payload: JSONEncoder().encode(input))
+            let rxInput = try cipherAndroid.openFrame(from: try cipherMac.seal(frame: f))
+            let decodedInput = try JSONDecoder().decode(RemoteInputPayload.self, from: rxInput.payload)
+            #expect(decodedInput == input)
+        }
     }
 }

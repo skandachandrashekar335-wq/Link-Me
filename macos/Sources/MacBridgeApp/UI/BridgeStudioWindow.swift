@@ -1151,7 +1151,7 @@ struct BridgeStudioWindow: View {
 
     private var telemetryFooter: some View {
         HStack {
-            Text("Mac Battery: \(viewModel.localBatteryPercent)%   •   Peer Battery: \(viewModel.peerBatteryLabel)   •   Transport: \(viewModel.bridgeState == .activeWifiStream ? "Local Wi-Fi mTLS 1.3" : "Encrypted Bluetooth")")
+            Text("Mac Battery: \(viewModel.localBatteryLabel)   •   Peer Battery: \(viewModel.peerBatteryLabel)   •   Transport: \(viewModel.bridgeState == .activeWifiStream ? "Local Wi-Fi mTLS 1.3" : "Encrypted Bluetooth")")
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(pal.secondaryText)
             Spacer()

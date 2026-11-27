@@ -152,8 +152,8 @@ object BridgeActivityHub {
         if (latency != null) _latencyMs.value = latency
     }
 
-    fun updateLocalBattery(percent: Int, charging: Boolean) {
-        _localBatteryPercent.value = percent.coerceIn(0, 100)
+    fun updateLocalBattery(percent: Int?, charging: Boolean) {
+        _localBatteryPercent.value = percent?.coerceIn(0, 100)
         _localIsCharging.value = charging
     }
 

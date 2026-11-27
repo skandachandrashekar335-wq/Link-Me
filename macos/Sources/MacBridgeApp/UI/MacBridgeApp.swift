@@ -46,7 +46,7 @@ struct MacBridgeApp: App {
                     NSApp.activate(ignoringOtherApps: true)
                 }
         }
-        .defaultSize(width: 920, height: 640)
+        .defaultSize(width: 980, height: 680)
 
         MenuBarExtra {
             MenuBarDashboardView(viewModel: viewModel)
@@ -148,14 +148,16 @@ final class BridgeDashboardViewModel: ObservableObject {
     @Published var peerCertFingerprint: String = ""
     @Published var peerBatteryPercent: Int? = nil
     @Published var peerIsCharging: Bool = false
-    @Published var localBatteryPercent: Int = MacBatteryMonitor.readBattery().level
+    @Published var localBatteryPercent: Int? = MacBatteryMonitor.readBattery().level
     @Published var localIsCharging: Bool = MacBatteryMonitor.readBattery().isCharging
     @Published var peerPaired: Bool = false
 
-    // Live Screen Mirroring state (0x0C / 0x0D)
+    // Live Screen Mirroring state (0x0C / 0x0D / 0x0E)
     @Published var isViewingRemoteScreen: Bool = false
     @Published var isSharingLocalScreen: Bool = false
     @Published var remoteScreenImage: NSImage?
+    @Published var remoteScreenWidth: Int = 1080
+    @Published var remoteScreenHeight: Int = 2400
     @Published var remoteScreenSizeText: String = ""
     @Published var remoteMirrorFps: Int = 0
     @Published var mirrorStatusText: String = "Standby"
@@ -208,6 +210,10 @@ final class BridgeDashboardViewModel: ObservableObject {
     private var mirrorFpsWindowStart: Date = Date()
     private var mirrorFrameCounter: Int = 0
     private var isBootstrapped = false
+
+    var localBatteryLabel: String {
+        localBatteryPercent.map { "\($0)%" } ?? "AC Power"
+    }
 
     var peerBatteryLabel: String {
         peerBatteryPercent.map { "\($0)%" } ?? "--"
@@ -497,11 +503,20 @@ final class BridgeDashboardViewModel: ObservableObject {
             remoteScreenImage = nil
             remoteMirrorFps = 0
         }
-        let fps = bridgeState == .activeWifiStream ? 15 : 3
-        let ctrl = ScreenControlPayload(action: nextStart ? "start" : "stop", source: "android", fps: fps, quality: 55)
+        let fps = bridgeState == .activeWifiStream ? 24 : 3
+        let ctrl = ScreenControlPayload(action: nextStart ? "start" : "stop", source: "android", fps: fps, quality: 60)
         Task {
             if let data = try? JSONEncoder().encode(ctrl),
                let frame = try? await transportManager.makeFrame(messageType: .screenControl, payload: data) {
+                try? await transportManager.sendResilientFrame(frame, preferBle: true)
+            }
+        }
+    }
+
+    func sendRemoteInput(_ input: RemoteInputPayload) {
+        Task {
+            if let data = try? JSONEncoder().encode(input),
+               let frame = try? await transportManager.makeFrame(messageType: .remoteInput, payload: data) {
                 try? await transportManager.sendResilientFrame(frame, preferBle: true)
             }
         }
@@ -511,8 +526,8 @@ final class BridgeDashboardViewModel: ObservableObject {
         if isSharingLocalScreen {
             Task { await stopSharingMacScreen() }
         } else {
-            let fps = bridgeState == .activeWifiStream ? 15 : 3
-            Task { await startSharingMacScreen(fps: fps, quality: 55) }
+            let fps = bridgeState == .activeWifiStream ? 24 : 3
+            Task { await startSharingMacScreen(fps: fps, quality: 60) }
         }
     }
 
@@ -796,6 +811,8 @@ final class BridgeDashboardViewModel: ObservableObject {
             if let packet = try? ScreenFramePacket.decode(from: frame.payload),
                let img = NSImage(data: packet.jpegData) {
                 remoteScreenImage = img
+                remoteScreenWidth = Int(packet.width)
+                remoteScreenHeight = Int(packet.height)
                 remoteScreenSizeText = "\(packet.width)×\(packet.height)"
                 mirrorFrameCounter += 1
                 let now = Date()

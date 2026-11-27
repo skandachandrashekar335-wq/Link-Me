@@ -240,17 +240,33 @@ data class PairAckPayload(
 data class ScreenControlPayload(
     val action: String,
     val source: String,
-    val fps: Int = 15,
+    val fps: Int = 24,
     val quality: Int = 60
 )
 
+@Serializable
+data class RemoteInputPayload(
+    val type: String,
+    val x: Double? = null,
+    val y: Double? = null,
+    val x1: Double? = null,
+    val y1: Double? = null,
+    val x2: Double? = null,
+    val y2: Double? = null,
+    val durationMs: Int? = null,
+    val action: String? = null,
+    val text: String? = null
+)
+
 data class ScreenFramePacket(
+    val source: Int = SOURCE_ANDROID,
     val width: Int,
     val height: Int,
     val timestampMs: Long,
     val jpegData: ByteArray
 ) {
     init {
+        require(source == SOURCE_ANDROID || source == SOURCE_MACOS) { "Invalid screen source" }
         require(width in 1..65535 && height in 1..65535) { "Invalid screen frame dimensions" }
         require(jpegData.isNotEmpty() && jpegData.size <= WireFrame.MAX_CONTROL_FRAME_BYTES - HEADER_SIZE) {
             "Screen frame JPEG exceeds max WireFrame bounds"
@@ -259,6 +275,7 @@ data class ScreenFramePacket(
 
     fun encode(): ByteArray {
         val buf = ByteBuffer.allocate(HEADER_SIZE + jpegData.size).order(ByteOrder.BIG_ENDIAN)
+        buf.put(source.toByte())
         buf.putShort(width.toShort())
         buf.putShort(height.toShort())
         buf.putLong(timestampMs)
@@ -269,14 +286,16 @@ data class ScreenFramePacket(
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is ScreenFramePacket) return false
-        return width == other.width &&
+        return source == other.source &&
+            width == other.width &&
             height == other.height &&
             timestampMs == other.timestampMs &&
             jpegData.contentEquals(other.jpegData)
     }
 
     override fun hashCode(): Int {
-        var result = width
+        var result = source
+        result = 31 * result + width
         result = 31 * result + height
         result = 31 * result + timestampMs.hashCode()
         result = 31 * result + jpegData.contentHashCode()
@@ -284,16 +303,19 @@ data class ScreenFramePacket(
     }
 
     companion object {
-        const val HEADER_SIZE = 12
+        const val SOURCE_ANDROID = 1
+        const val SOURCE_MACOS = 2
+        const val HEADER_SIZE = 13
 
         fun decode(payload: ByteArray): ScreenFramePacket {
             require(payload.size > HEADER_SIZE) { "Invalid SCREEN_FRAME subheader" }
             val buf = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN)
+            val src = buf.get().toInt() and 0xFF
             val w = buf.short.toInt() and 0xFFFF
             val h = buf.short.toInt() and 0xFFFF
             val ts = buf.long
             val jpeg = ByteArray(payload.size - HEADER_SIZE).also { buf.get(it) }
-            return ScreenFramePacket(width = w, height = h, timestampMs = ts, jpegData = jpeg)
+            return ScreenFramePacket(source = src, width = w, height = h, timestampMs = ts, jpegData = jpeg)
         }
     }
 }

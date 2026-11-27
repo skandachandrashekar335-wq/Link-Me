@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_description">Allows Link-Me to forward mouse clicks, trackpad swipes, and text input from your paired Mac during interactive Screen Mirroring.</string>
+</resources>

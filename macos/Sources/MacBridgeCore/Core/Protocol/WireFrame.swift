@@ -14,8 +14,9 @@ public enum WireMessageType: UInt8, Codable, Sendable, CaseIterable {
     case openUrl = 0x0B
     case screenFrame = 0x0C
     case screenControl = 0x0D
-    case pairCommit = 0x0E
-    case pairAck = 0x0F
+    case remoteInput = 0x0E
+    case pairCommit = 0x0F
+    case pairAck = 0x10
 }
 
 public enum ProtocolError: Error, Equatable, Sendable {

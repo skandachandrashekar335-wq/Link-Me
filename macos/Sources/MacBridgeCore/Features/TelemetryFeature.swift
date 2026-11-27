@@ -2,23 +2,23 @@ import Foundation
 import IOKit.ps
 
 public struct LocalBatteryReading: Sendable, Equatable {
-    public let level: Int
+    public let level: Int?
     public let isCharging: Bool
     public let hasBattery: Bool
 
-    public init(level: Int, isCharging: Bool, hasBattery: Bool) {
-        self.level = min(100, max(0, level))
+    public init(level: Int?, isCharging: Bool, hasBattery: Bool) {
+        self.level = level.map { min(100, max(0, $0)) }
         self.isCharging = isCharging
         self.hasBattery = hasBattery
     }
 }
 
-/// Reads real macOS internal battery capacity & charging status via IOKit PowerSources.
+/// Reads real macOS internal battery capacity & charging status via IOKit PowerSources (never synthetic defaults).
 public enum MacBatteryMonitor {
     public static func readBattery() -> LocalBatteryReading {
         guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let sources = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef] else {
-            return LocalBatteryReading(level: 100, isCharging: true, hasBattery: false)
+            return LocalBatteryReading(level: nil, isCharging: true, hasBattery: false)
         }
         for source in sources {
             guard let desc = IOPSGetPowerSourceDescription(blob, source)?.takeUnretainedValue() as? [String: Any],
@@ -34,7 +34,7 @@ public enum MacBatteryMonitor {
                 return LocalBatteryReading(level: pct, isCharging: isCharging, hasBattery: true)
             }
         }
-        return LocalBatteryReading(level: 100, isCharging: true, hasBattery: false)
+        return LocalBatteryReading(level: nil, isCharging: true, hasBattery: false)
     }
 }
 
@@ -53,11 +53,12 @@ public actor TelemetryFeature {
         latestPeerTelemetry = telemetry
     }
 
-    public func emitLocalTelemetry(deviceId: String, bridgeState: BridgeState) async throws -> PingTelemetryPayload {
+    public func emitLocalTelemetry(deviceId: String, bridgeState: BridgeState) async throws -> PingTelemetryPayload? {
         let reading = MacBatteryMonitor.readBattery()
+        guard let realLevel = reading.level else { return nil }
         let payload = PingTelemetryPayload(
             deviceId: deviceId,
-            batteryLevel: reading.level,
+            batteryLevel: realLevel,
             isCharging: reading.isCharging,
             batterySaverActive: ProcessInfo.processInfo.isLowPowerModeEnabled,
             transportState: bridgeState,

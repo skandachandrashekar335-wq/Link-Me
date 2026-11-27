@@ -265,7 +265,7 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
 
         if chunk.first == BluetoothPacketCodec.ackTag {
             if let ack = BluetoothPacketCodec.AckPacket.decode(chunk) {
-                ackLock.withLock { ackWaiters[ack.packetId]?.signal() }
+                _ = ackLock.withLock { ackWaiters[ack.packetId]?.signal() }
             }
             return
         }

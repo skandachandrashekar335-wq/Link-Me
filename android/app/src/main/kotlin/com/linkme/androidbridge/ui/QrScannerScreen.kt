@@ -90,6 +90,7 @@ import com.linkme.androidbridge.core.protocol.PairCommitPayload
 import com.linkme.androidbridge.core.protocol.PairHelloPayload
 import com.linkme.androidbridge.core.protocol.PairingCommitMac
 import com.linkme.androidbridge.service.BridgeActivityHub
+import com.linkme.androidbridge.service.TelemetryFeature
 import com.linkme.androidbridge.ui.theme.LocalBridgePalette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -570,10 +571,7 @@ fun QrScannerScreen(
                                 showManualFallback = true
                                 return@Button
                             }
-                            val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
-                            val battPct = (bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-                                ?.takeIf { it in 0..100 } ?: 100)
-                            val charging = bm?.isCharging == true
+                            val snap = TelemetryFeature(active.localDeviceId).readCurrentBattery(context)
                             val macHex = PairingCommitMac.computeHex(
                                 sharedBleSecret = active.sharedBleSecret,
                                 deviceId = active.localDeviceId,
@@ -587,8 +585,8 @@ fun QrScannerScreen(
                                 ephemeralPublicKey = active.localEphemeralPublicKey,
                                 spkiSha256 = active.localSpkiSha256,
                                 sasMacHex = macHex,
-                                batteryLevel = battPct,
-                                isCharging = charging
+                                batteryLevel = snap.level ?: 0,
+                                isCharging = snap.isCharging
                             )
                             onConfirmTrustedPeer(
                                 active.peerId,

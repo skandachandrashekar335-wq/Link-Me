@@ -146,6 +146,7 @@ public final class ScreenMirrorManager: NSObject, SCStreamOutput, SCStreamDelega
 
         let tsMs = UInt64(now.timeIntervalSince1970 * 1000)
         if let packet = try? ScreenFramePacket(
+            source: ScreenFrameSource.macos.rawValue,
             width: UInt16(clamping: outWidth),
             height: UInt16(clamping: outHeight),
             timestampMs: tsMs,

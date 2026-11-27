@@ -21,12 +21,14 @@ import com.linkme.androidbridge.service.BridgeForegroundService
 import com.linkme.androidbridge.ui.theme.AndroidBridgeTheme
 
 class MainActivity : ComponentActivity() {
-    private val trustStore = TrustStore()
+    private lateinit var trustStore: TrustStore
     private val sharedUris = mutableListOf<Uri>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        trustStore = TrustStore.forContext(this)
+
         ContextCompat.startForegroundService(
             this,
             Intent(this, BridgeForegroundService::class.java)
@@ -39,18 +41,22 @@ class MainActivity : ComponentActivity() {
                 var currentState by remember { mutableStateOf(stateMachine.state) }
                 var showQrPairing by remember { mutableStateOf(false) }
                 var queuedShares by remember { mutableIntStateOf(sharedUris.size) }
+                var pairedPeerName by remember {
+                    mutableStateOf(trustStore.allPeers().firstOrNull()?.deviceName ?: "No Mac Paired")
+                }
 
                 if (showQrPairing) {
                     QrScannerScreen(
-                        onConfirmTrustedPeer = { peerId, _, bleSecret ->
+                        onConfirmTrustedPeer = { peerId, peerName, certSha256, bleSecret ->
                             trustStore.savePeer(
                                 TrustedPeer(
                                     deviceId = peerId,
-                                    deviceName = "Paired Mac",
-                                    pinnedCertSha256 = "0".repeat(64),
+                                    deviceName = peerName,
+                                    pinnedCertSha256 = certSha256,
                                     sharedBleSecret = bleSecret
                                 )
                             )
+                            pairedPeerName = peerName
                             showQrPairing = false
                         },
                         onCancel = { showQrPairing = false }
@@ -58,7 +64,7 @@ class MainActivity : ComponentActivity() {
                 } else {
                     BridgeHomeScreen(
                         bridgeState = currentState,
-                        peerName = "Skanda-MacBook-Pro",
+                        peerName = pairedPeerName,
                         batteryPercent = 84,
                         queuedShareCount = queuedShares,
                         onWakeWifi = {

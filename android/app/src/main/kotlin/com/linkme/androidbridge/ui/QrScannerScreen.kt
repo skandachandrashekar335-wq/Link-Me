@@ -30,10 +30,16 @@ import com.linkme.androidbridge.core.crypto.PairingUriPayload
  */
 @Composable
 fun QrScannerScreen(
-    onConfirmTrustedPeer: (deviceId: String, sasCode: String, sharedBleSecret: ByteArray) -> Unit,
+    onConfirmTrustedPeer: (
+        deviceId: String,
+        deviceName: String,
+        pinnedCertSha256: String,
+        sharedBleSecret: ByteArray
+    ) -> Unit,
     onCancel: () -> Unit
 ) {
     var manualUri by remember { mutableStateOf("") }
+    var peerCertFingerprint by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var derivedSas by remember { mutableStateOf<String?>(null) }
     var parsedPeerId by remember { mutableStateOf<String?>(null) }
@@ -68,12 +74,20 @@ fun QrScannerScreen(
                 singleLine = true
             )
 
+            OutlinedTextField(
+                value = peerCertFingerprint,
+                onValueChange = { peerCertFingerprint = it },
+                label = { Text("Peer 64-hex TLS Cert SHA-256 (from PAIR_HELLO)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+
             Button(
                 onClick = {
                     runCatching {
                         val parsed = PairingUriPayload.parse(manualUri.trim())
                         val crypto = PairingCrypto()
-                        val nonce = PairingCrypto.decodeKeyStringOrHex(parsed.nonceHex)
+                        val nonce = decodeHex(parsed.nonceHex)
                         val derived = crypto.deriveSecrets(parsed.publicKeyBase64Url, nonce)
                         parsedPeerId = parsed.deviceId
                         derivedSas = derived.sasCode
@@ -100,7 +114,12 @@ fun QrScannerScreen(
                     Button(onClick = {
                         val peerId = parsedPeerId ?: return@Button
                         val secret = derivedBleSecret ?: return@Button
-                        onConfirmTrustedPeer(peerId, sas, secret)
+                        val cleanFp = peerCertFingerprint.trim().lowercase()
+                        if (cleanFp.length != 64 || !cleanFp.all { it in '0'..'9' || it in 'a'..'f' }) {
+                            errorMessage = "Enter valid 64-hex SHA-256 certificate pin from PAIR_HELLO"
+                            return@Button
+                        }
+                        onConfirmTrustedPeer(peerId, "Paired Mac", cleanFp, secret)
                     }) {
                         Text("Confirm & Trust")
                     }
@@ -112,8 +131,7 @@ fun QrScannerScreen(
     }
 }
 
-private fun PairingCrypto.Companion.decodeKeyStringOrHex(hex: String): ByteArray {
-    return ByteArray(hex.length / 2) { idx ->
+private fun decodeHex(hex: String): ByteArray =
+    ByteArray(hex.length / 2) { idx ->
         hex.substring(idx * 2, idx * 2 + 2).toInt(16).toByte()
     }
-}

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, linkme-main ]
   pull_request:
 
 jobs:
@@ -21,7 +21,7 @@ jobs:
 
   macos-build-and-test:
     name: macOS (MacBridge Swift 6)
-    runs-on: macos-15
+    runs-on: macos-14
     defaults:
       run:
         working-directory: macos
@@ -46,7 +46,5 @@ jobs:
           java-version: "17"
       - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.10.2"
       - name: Run Unit Tests & Assemble Debug APK
-        run: gradle testDebugUnitTest assembleDebug --no-daemon
+        run: ./gradlew testDebugUnitTest assembleDebug --no-daemon

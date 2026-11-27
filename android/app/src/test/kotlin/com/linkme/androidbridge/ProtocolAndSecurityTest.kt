@@ -1,6 +1,8 @@
 package com.linkme.androidbridge
 
+import com.linkme.androidbridge.core.crypto.AesGcmTrustBox
 import com.linkme.androidbridge.core.crypto.BlePrivacyBeacon
+import com.linkme.androidbridge.core.crypto.FileTrustBackend
 import com.linkme.androidbridge.core.crypto.IdentityManager
 import com.linkme.androidbridge.core.crypto.PairingCrypto
 import com.linkme.androidbridge.core.crypto.PairingUriPayload
@@ -225,6 +227,47 @@ class ProtocolAndSecurityTest {
         assertTrue(trustStore.verifyPeerCertificate(identity.certificateDer, "mac-1"))
         val tampered = identity.certificateDer.copyOf().apply { this[0] = (this[0].toInt() xor 0xFF).toByte() }
         assertFalse(trustStore.verifyPeerCertificate(tampered, "mac-1"))
+    }
+
+    @Test
+    fun trustStorePersistsPeersEncryptedAcrossRestarts() {
+        val tempFile = Files.createTempFile("linkme-trust", ".enc").toFile()
+        try {
+            val aesKey = AesGcmTrustBox.ephemeralAesKey()
+            val secret = ByteArray(32) { (it + 7).toByte() }
+            val certPin = "ab".repeat(32)
+
+            val writerStore = TrustStore(
+                backend = FileTrustBackend(tempFile),
+                trustBox = AesGcmTrustBox { aesKey }
+            )
+            writerStore.savePeer(
+                TrustedPeer(
+                    deviceId = "mac-persisted-1",
+                    deviceName = "Skanda-MacBook-Pro",
+                    pinnedCertSha256 = certPin,
+                    sharedBleSecret = secret
+                )
+            )
+
+            // Verify zero plaintext secrets on disk
+            val rawDisk = tempFile.readText()
+            assertFalse(rawDisk.contains("mac-persisted-1"))
+            assertFalse(rawDisk.contains(certPin))
+
+            // Re-open TrustStore simulating app restart
+            val readerStore = TrustStore(
+                backend = FileTrustBackend(tempFile),
+                trustBox = AesGcmTrustBox { aesKey }
+            )
+            val restored = readerStore.getPeer("mac-persisted-1")
+            assertNotNull(restored)
+            assertEquals("Skanda-MacBook-Pro", restored!!.deviceName)
+            assertEquals(certPin, restored.pinnedCertSha256)
+            assertArrayEquals(secret, restored.sharedBleSecret)
+        } finally {
+            tempFile.delete()
+        }
     }
 
     @Test

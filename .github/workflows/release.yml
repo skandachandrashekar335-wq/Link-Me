@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos-dmg:
+    name: Build macOS DMG
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build MacBridge Release Binary & .app Bundle
+        run: |
+          cd macos
+          swift build -c release
+          BIN_PATH="$(swift build -c release --show-bin-path)/MacBridge"
+          APP_DIR="build/MacBridge.app"
+          rm -rf "$APP_DIR"
+          mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+          cp "$BIN_PATH" "$APP_DIR/Contents/MacOS/MacBridge"
+          cp Resources/Info.plist "$APP_DIR/Contents/Info.plist"
+          printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
+          codesign --force --deep --sign - --entitlements Resources/MacBridge.entitlements "$APP_DIR"
+
+      - name: Package DMG & Checksum
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p dist/dmg-staging
+          cp -R macos/build/MacBridge.app dist/dmg-staging/
+          ln -s /Applications dist/dmg-staging/Applications
+          hdiutil create -volname "MacBridge ${TAG}" \
+            -srcfolder dist/dmg-staging \
+            -ov -format UDZO \
+            "dist/MacBridge-${TAG}.dmg"
+          (cd dist && shasum -a 256 "MacBridge-${TAG}.dmg" > SHA256SUMS.macos.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-release
+          path: |
+            dist/MacBridge-*.dmg
+            dist/SHA256SUMS.macos.txt
+
+  build-android-apk:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Assemble Release APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Package & Sign Release APK
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          UNSIGNED_APK="$(find android/app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          OUT_APK="dist/AndroidBridge-${TAG}.apk"
+          cp "$UNSIGNED_APK" "$OUT_APK"
+          if [[ "$UNSIGNED_APK" == *"-unsigned.apk" ]]; then
+            APKSIGNER="$(find "${ANDROID_HOME}/build-tools" -name apksigner | sort -V | tail -n 1)"
+            keytool -genkeypair -v -keystore /tmp/ci-release.jks \
+              -storepass linkme-ci-pass -keypass linkme-ci-pass \
+              -alias linkme -keyalg RSA -keysize 2048 -validity 3650 \
+              -dname "CN=Link-Me CI,O=Link-Me,C=US"
+            "$APKSIGNER" sign --ks /tmp/ci-release.jks \
+              --ks-pass pass:linkme-ci-pass --key-pass pass:linkme-ci-pass \
+              --out "$OUT_APK" "$UNSIGNED_APK"
+          fi
+          (cd dist && sha256sum "AndroidBridge-${TAG}.apk" > SHA256SUMS.android.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-release
+          path: |
+            dist/AndroidBridge-*.apk
+            dist/SHA256SUMS.android.txt
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-macos-dmg, build-android-apk]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Combine SHA256SUMS
+        run: |
+          mkdir -p release-files
+          cp release-artifacts/macos-release/MacBridge-*.dmg release-files/
+          cp release-artifacts/android-release/AndroidBridge-*.apk release-files/
+          cat release-artifacts/macos-release/SHA256SUMS.macos.txt \
+              release-artifacts/android-release/SHA256SUMS.android.txt > release-files/SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-files/MacBridge-*.dmg
+            release-files/AndroidBridge-*.apk
+            release-files/SHA256SUMS.txt
+          generate_release_notes: true

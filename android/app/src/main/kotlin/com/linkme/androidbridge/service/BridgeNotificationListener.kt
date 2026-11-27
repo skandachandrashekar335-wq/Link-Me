@@ -44,6 +44,16 @@ class AndroidRemoteInputExecutor(
 class BridgeNotificationListener : NotificationListenerService() {
     private val router = NotificationMirrorRouter(ownPackageName = "com.linkme.androidbridge")
 
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        activeInstance = this
+    }
+
+    override fun onListenerDisconnected() {
+        activeInstance = null
+        super.onListenerDisconnected()
+    }
+
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         val notification = sbn?.notification ?: return
         if ((notification.flags and Notification.FLAG_ONGOING_EVENT) != 0) return
@@ -87,6 +97,9 @@ class BridgeNotificationListener : NotificationListenerService() {
     }
 
     companion object {
+        @Volatile
+        var activeInstance: BridgeNotificationListener? = null
+
         @Volatile
         var onNotificationEvent: ((NotificationEventPayload) -> Unit)? = null
     }

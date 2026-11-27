@@ -2,6 +2,13 @@ import CryptoKit
 import Foundation
 import Security
 
+@_silgen_name("SecIdentityCreate")
+private func _linkmeSecIdentityCreate(
+    _ allocator: CFAllocator?,
+    _ certificate: SecCertificate,
+    _ privateKey: SecKey
+) -> Unmanaged<SecIdentity>?
+
 public struct DeviceIdentity: Sendable, Equatable {
     public let deviceId: String
     public let privateKeyRaw: Data
@@ -39,7 +46,7 @@ public struct DeviceIdentity: Sendable, Equatable {
         guard let secKey = SecKeyCreateWithData(x963Private as CFData, attrs as CFDictionary, &error) else {
             return nil
         }
-        return SecIdentityCreate(nil, secCert, secKey)
+        return _linkmeSecIdentityCreate(nil, secCert, secKey)?.takeRetainedValue()
     }
 }
 

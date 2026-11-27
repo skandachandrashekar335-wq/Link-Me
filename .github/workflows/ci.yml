@@ -27,8 +27,13 @@ jobs:
         working-directory: macos
     steps:
       - uses: actions/checkout@v4
-      - name: Swift Build & Test
+      - name: Select Xcode 16 & Run Swift Test
         run: |
+          if [ -d "/Applications/Xcode_16.2.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.2.app
+          elif [ -d "/Applications/Xcode_16.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.app
+          fi
           swift --version
           swift test
 
@@ -44,7 +49,10 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
+      - name: Accept Preinstalled Android SDK Licenses
+        run: |
+          mkdir -p "${ANDROID_HOME}/licenses"
+          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
       - uses: gradle/actions/setup-gradle@v4
       - name: Run Unit Tests & Assemble Debug APK
         run: ./gradlew testDebugUnitTest assembleDebug --no-daemon

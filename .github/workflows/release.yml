@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag name (e.g. v0.1.0)"
+        required: true
+        default: "v0.1.0"
 
 permissions:
   contents: write
@@ -15,37 +21,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build MacBridge Release Binary & .app Bundle
+      - name: Select Xcode 16 & Build MacBridge.app
         run: |
+          if [ -d "/Applications/Xcode_16.2.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.2.app
+          elif [ -d "/Applications/Xcode_16.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.app
+          fi
           cd macos
           swift build -c release
           BIN_PATH="$(swift build -c release --show-bin-path)/MacBridge"
-          APP_DIR="build/MacBridge.app"
-          rm -rf "$APP_DIR"
+          APP_DIR="../dist/MacBridge.app"
+          rm -rf ../dist
           mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
           cp "$BIN_PATH" "$APP_DIR/Contents/MacOS/MacBridge"
           cp Resources/Info.plist "$APP_DIR/Contents/Info.plist"
           printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
-          codesign --force --deep --sign - --entitlements Resources/MacBridge.entitlements "$APP_DIR"
+          codesign --force --deep --sign - "$APP_DIR"
 
-      - name: Package DMG & Checksum
+      - name: Package DMG & Verify Non-Empty
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          mkdir -p dist/dmg-staging
-          cp -R macos/build/MacBridge.app dist/dmg-staging/
-          ln -s /Applications dist/dmg-staging/Applications
-          hdiutil create -volname "MacBridge ${TAG}" \
-            -srcfolder dist/dmg-staging \
+          TAG_NAME="${{ github.event.inputs.tag || github.ref_name }}"
+          ln -s /Applications dist/Applications
+          hdiutil create -volname "MacBridge" \
+            -srcfolder dist/ \
             -ov -format UDZO \
-            "dist/MacBridge-${TAG}.dmg"
-          (cd dist && shasum -a 256 "MacBridge-${TAG}.dmg" > SHA256SUMS.macos.txt)
+            "MacBridge-${TAG_NAME}.dmg"
+          test -s "MacBridge-${TAG_NAME}.dmg"
+          shasum -a 256 "MacBridge-${TAG_NAME}.dmg" > SHA256SUMS.macos.txt
+          ls -lh "MacBridge-${TAG_NAME}.dmg"
 
       - uses: actions/upload-artifact@v4
         with:
           name: macos-release
           path: |
-            dist/MacBridge-*.dmg
-            dist/SHA256SUMS.macos.txt
+            MacBridge-*.dmg
+            SHA256SUMS.macos.txt
 
   build-android-apk:
     name: Build Android APK
@@ -58,21 +69,24 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
+      - name: Accept Preinstalled Android SDK Licenses
+        run: |
+          mkdir -p "${ANDROID_HOME}/licenses"
+          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Assemble Release APK
         working-directory: android
         run: ./gradlew assembleRelease --no-daemon
 
-      - name: Package & Sign Release APK
+      - name: Sign & Package Release APK
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          mkdir -p dist
-          UNSIGNED_APK="$(find android/app/build/outputs/apk/release -name '*.apk' | head -n 1)"
-          OUT_APK="dist/AndroidBridge-${TAG}.apk"
-          cp "$UNSIGNED_APK" "$OUT_APK"
-          if [[ "$UNSIGNED_APK" == *"-unsigned.apk" ]]; then
+          TAG_NAME="${{ github.event.inputs.tag || github.ref_name }}"
+          mkdir -p release-out
+          RAW_APK="$(find android/app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          OUT_APK="release-out/AndroidBridge-${TAG_NAME}.apk"
+          if [[ "$RAW_APK" == *"-unsigned.apk" ]]; then
             APKSIGNER="$(find "${ANDROID_HOME}/build-tools" -name apksigner | sort -V | tail -n 1)"
             keytool -genkeypair -v -keystore /tmp/ci-release.jks \
               -storepass linkme-ci-pass -keypass linkme-ci-pass \
@@ -80,36 +94,45 @@ jobs:
               -dname "CN=Link-Me CI,O=Link-Me,C=US"
             "$APKSIGNER" sign --ks /tmp/ci-release.jks \
               --ks-pass pass:linkme-ci-pass --key-pass pass:linkme-ci-pass \
-              --out "$OUT_APK" "$UNSIGNED_APK"
+              --out "$OUT_APK" "$RAW_APK"
+          else
+            cp "$RAW_APK" "$OUT_APK"
           fi
-          (cd dist && sha256sum "AndroidBridge-${TAG}.apk" > SHA256SUMS.android.txt)
+          test -s "$OUT_APK"
+          (cd release-out && sha256sum "AndroidBridge-${TAG_NAME}.apk" > SHA256SUMS.android.txt)
+          ls -lh "$OUT_APK"
 
       - uses: actions/upload-artifact@v4
         with:
           name: android-release
           path: |
-            dist/AndroidBridge-*.apk
-            dist/SHA256SUMS.android.txt
+            release-out/AndroidBridge-*.apk
+            release-out/SHA256SUMS.android.txt
 
   publish-release:
     name: Publish GitHub Release
     needs: [build-macos-dmg, build-android-apk]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: release-artifacts
 
-      - name: Combine SHA256SUMS
+      - name: Prepare Release Assets & SHA256SUMS.txt
         run: |
           mkdir -p release-files
           cp release-artifacts/macos-release/MacBridge-*.dmg release-files/
           cp release-artifacts/android-release/AndroidBridge-*.apk release-files/
           cat release-artifacts/macos-release/SHA256SUMS.macos.txt \
               release-artifacts/android-release/SHA256SUMS.android.txt > release-files/SHA256SUMS.txt
+          ls -lh release-files/
+          cat release-files/SHA256SUMS.txt
 
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |
             release-files/MacBridge-*.dmg
             release-files/AndroidBridge-*.apk

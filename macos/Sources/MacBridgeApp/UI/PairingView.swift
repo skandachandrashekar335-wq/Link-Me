@@ -11,29 +11,37 @@ struct PairingView: View {
 
     var body: some View {
         VStack(spacing: 14) {
+            Text("CURVE25519 // QR PAIRING")
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(StitchTokens.primaryCrimson)
+
             Text("Pair Android Device")
                 .font(.headline)
+                .foregroundStyle(StitchTokens.onSurface)
 
             if let nsImage = qrNSImage(from: viewModel.pairingUriString) {
                 Image(nsImage: nsImage)
                     .interpolation(.none)
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 180, height: 180)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .frame(width: 184, height: 184)
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.white))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(StitchTokens.outlineVariant, lineWidth: 1))
             } else {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(.quaternary)
-                    .frame(width: 180, height: 180)
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(StitchTokens.surfaceContainer)
+                    .frame(width: 184, height: 184)
                     .overlay {
                         Image(systemName: "qrcode")
                             .font(.largeTitle)
+                            .foregroundStyle(StitchTokens.secondaryText)
                     }
             }
 
-            Text("QR expires in \(formattedCountdown)")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+            Text("EXPIRES IN \(formattedCountdown)")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(StitchTokens.secondaryText)
 
             if let approval = viewModel.pendingApproval {
                 VStack(spacing: 6) {
@@ -42,7 +50,15 @@ struct PairingView: View {
                     Text(approval.sasCode)
                         .font(.system(.title, design: .monospaced).bold())
                         .tracking(4)
+                        .foregroundStyle(StitchTokens.tertiaryMint)
                 }
+                .padding(10)
+                .frame(maxWidth: .infinity)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(StitchTokens.surfaceContainer)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(StitchTokens.primaryCrimson, lineWidth: 1))
+                )
                 HStack(spacing: 12) {
                     Button("Reject", role: .destructive) {
                         viewModel.rejectPairing()
@@ -51,18 +67,22 @@ struct PairingView: View {
                         viewModel.confirmPairing()
                     }
                     .buttonStyle(.borderedProminent)
+                    .tint(StitchTokens.primaryCrimson)
                 }
             } else {
                 Text("Scan with AndroidBridge to verify 6-digit SAS")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(StitchTokens.secondaryText)
                 Button("Close") {
                     viewModel.rejectPairing()
                 }
+                .buttonStyle(.bordered)
             }
         }
         .padding(20)
-        .frame(width: 320)
+        .frame(width: 340)
+        .background(StitchTokens.surface)
+        .foregroundStyle(StitchTokens.onSurface)
         .onReceive(countdownTimer) { now in
             viewModel.pairingRemainingSeconds = max(0, Int(viewModel.pairingExpiresAt.timeIntervalSince(now)))
         }

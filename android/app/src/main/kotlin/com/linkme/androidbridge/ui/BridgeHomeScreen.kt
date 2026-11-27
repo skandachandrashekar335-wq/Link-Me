@@ -1,7 +1,9 @@
 package com.linkme.androidbridge.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,266 +22,445 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.linkme.androidbridge.core.protocol.BridgeState
-import com.linkme.androidbridge.ui.theme.WarmIndustrialPalette
+import com.linkme.androidbridge.core.protocol.NotificationEventPayload
+import com.linkme.androidbridge.ui.theme.StitchTokens
 
 @Composable
 fun BridgeHomeScreen(
     bridgeState: BridgeState,
     peerName: String,
+    isPaired: Boolean,
     batteryPercent: Int,
-    serviceActive: Boolean,
+    isCharging: Boolean,
+    clipboardSyncEnabled: Boolean,
+    notificationMirrorEnabled: Boolean,
+    latencyMs: Int?,
     queuedShareCount: Int,
-    logs: List<String>,
+    notifications: List<NotificationEventPayload>,
+    onToggleClipboardSync: (Boolean) -> Unit,
+    onToggleNotificationMirror: (Boolean) -> Unit,
     onScanQrClick: () -> Unit,
     onSendFileClick: () -> Unit,
     onSyncClipboardClick: () -> Unit,
     onNotificationAccessClick: () -> Unit,
-    onToggleServiceClick: () -> Unit
+    onSendInlineReply: (sbnKey: String, replyText: String) -> Unit
 ) {
-    val borderColor = MaterialTheme.colorScheme.outline
     val isTurbo = bridgeState == BridgeState.ACTIVE_WIFI_STREAM
 
-    Scaffold(containerColor = MaterialTheme.colorScheme.background) { innerPadding ->
+    Scaffold(
+        containerColor = StitchTokens.Surface,
+        bottomBar = {
+            Column {
+                HorizontalDivider(thickness = 1.dp, color = StitchTokens.OutlineVariant)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(StitchTokens.SurfaceLowest)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val latLabel = latencyMs?.let { "${it}MS" } ?: "-- MS"
+                    Text(
+                        text = "LATENCY: $latLabel",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.SemiBold,
+                        color = StitchTokens.TertiaryMint
+                    )
+                    Text(
+                        text = "E2EE: TLS 1.3 PINNED",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.SemiBold,
+                        color = StitchTokens.SecondaryText
+                    )
+                }
+            }
+        }
+    ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
                 .verticalScroll(rememberScrollState())
-                .padding(18.dp),
+                .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Header Bar
+            // 1. Header: 40x40 Circular Battery Ring (#74D8BD) + Bolt + Device + Status Pill
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
-                    Text(
-                        text = "LINK-ME // ANDROIDBRIDGE",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontFamily = FontFamily.Monospace,
-                        color = WarmIndustrialPalette.CrimsonAccent,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "Continuity Node",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-                Text(
-                    text = "v0.1.1",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            // Live Connection & mTLS 1.3 Security Card
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, borderColor)
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                    Box(
+                        modifier = Modifier.size(40.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(9.dp)
-                                    .clip(CircleShape)
-                                    .background(
-                                        if (isTurbo) WarmIndustrialPalette.SignalGreen
-                                        else WarmIndustrialPalette.CrimsonAccent
-                                    )
+                        Canvas(modifier = Modifier.size(40.dp)) {
+                            val strokePx = 3.5.dp.toPx()
+                            drawArc(
+                                color = StitchTokens.SurfaceHigh,
+                                startAngle = 0f,
+                                sweepAngle = 360f,
+                                useCenter = false,
+                                style = Stroke(width = strokePx)
                             )
-                            Text(
-                                text = peerName,
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold
+                            drawArc(
+                                color = StitchTokens.TertiaryMint,
+                                startAngle = -90f,
+                                sweepAngle = 360f * (batteryPercent.coerceIn(0, 100) / 100f),
+                                useCenter = false,
+                                style = Stroke(width = strokePx, cap = StrokeCap.Round)
                             )
                         }
                         Text(
-                            text = if (isTurbo) "WI-FI TURBO" else "BLE STANDBY",
-                            style = MaterialTheme.typography.labelSmall,
+                            text = if (isCharging) "⚡" else "$batteryPercent",
+                            fontSize = if (isCharging) 14.sp else 10.sp,
                             fontFamily = FontFamily.Monospace,
-                            color = if (isTurbo) WarmIndustrialPalette.SignalGreen else WarmIndustrialPalette.CrimsonAccent
+                            fontWeight = FontWeight.Bold,
+                            color = StitchTokens.TertiaryMint
                         )
                     }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(
-                            text = "mTLS 1.3 · Keystore Pinned",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            text = peerName,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = StitchTokens.OnSurface
                         )
+                        val chargeLabel = if (isCharging) "CHARGING" else "BATTERY"
+                        val pairLabel = if (isPaired) "PAIRED" else "UNPAIRED"
                         Text(
-                            text = "BAT $batteryPercent%",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-
-                    if (queuedShareCount > 0) {
-                        Text(
-                            text = "QUEUED SHARE ITEMS: $queuedShareCount",
+                            text = "$batteryPercent% $chargeLabel • $pairLabel",
                             style = MaterialTheme.typography.labelSmall,
                             fontFamily = FontFamily.Monospace,
-                            color = WarmIndustrialPalette.CrimsonAccent
+                            color = StitchTokens.SecondaryText
                         )
                     }
                 }
-            }
 
-            // Primary CTA: Scan Mac QR Code
-            Button(
-                onClick = onScanQrClick,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(50.dp),
-                shape = RoundedCornerShape(10.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = WarmIndustrialPalette.CrimsonAccent,
-                    contentColor = androidx.compose.ui.graphics.Color.White
-                )
-            ) {
-                Text(
-                    text = "Scan Mac QR Code",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
-
-            // 2x2 Quick Actions Grid
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                IndustrialActionTile(
-                    title = "Send File",
-                    subtitle = "64 KB mTLS Stream",
-                    modifier = Modifier.weight(1f),
-                    borderColor = borderColor,
-                    onClick = onSendFileClick
-                )
-                IndustrialActionTile(
-                    title = "Sync Clipboard",
-                    subtitle = "Loop-Safe Push",
-                    modifier = Modifier.weight(1f),
-                    borderColor = borderColor,
-                    onClick = onSyncClipboardClick
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                IndustrialActionTile(
-                    title = "Notification Access",
-                    subtitle = "Inline Reply Listener",
-                    modifier = Modifier.weight(1f),
-                    borderColor = borderColor,
-                    onClick = onNotificationAccessClick
-                )
-                IndustrialActionTile(
-                    title = if (serviceActive) "Bridge Online" else "Start Bridge",
-                    subtitle = "connectedDevice FGS",
-                    modifier = Modifier.weight(1f),
-                    borderColor = borderColor,
-                    onClick = onToggleServiceClick
-                )
-            }
-
-            // Security & Transfer Telemetry Feed
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, borderColor)
-            ) {
-                Column(
-                    modifier = Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(
+                            if (isTurbo) StitchTokens.TertiaryMint.copy(alpha = 0.16f)
+                            else StitchTokens.SurfaceHigh
+                        )
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
                 ) {
                     Text(
-                        text = "SECURITY & TRANSFER LOG",
+                        text = if (isTurbo) "WI-FI TURBO 5GHZ" else "BLE STANDBY",
                         style = MaterialTheme.typography.labelSmall,
                         fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        fontWeight = FontWeight.Bold,
+                        color = if (isTurbo) StitchTokens.TertiaryMint else StitchTokens.OnSurface
                     )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    logs.forEach { entry ->
-                        Text(
-                            text = "> $entry",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace
+                }
+            }
+
+            // 2. Beam Files Card (#0D0E10 dashed/hairline)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(StitchTokens.SurfaceLowest)
+                    .clickable(onClick = onSendFileClick)
+                    .padding(1.dp)
+            ) {
+                Canvas(modifier = Modifier.matchParentSize()) {
+                    drawRoundRect(
+                        color = StitchTokens.OutlineVariant,
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(10.dp.toPx()),
+                        style = Stroke(
+                            width = 1.dp.toPx(),
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 8f), 0f)
                         )
+                    )
+                }
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 18.dp, horizontal = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Text(
+                        text = "↑ BEAM FILES TO MAC",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = StitchTokens.OnSurface
+                    )
+                    Text(
+                        text = if (queuedShareCount > 0) {
+                            "$queuedShareCount QUEUED • MAX 4.0 GB • DIRECT P2P"
+                        } else {
+                            "MAX 4.0 GB • DIRECT P2P"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = StitchTokens.SecondaryText
+                    )
+                }
+            }
+
+            // 3. Feature Switch Cards (#1F2022 + #5C3F40 hairline + #E11D48 Switch)
+            StitchSwitchCard(
+                title = "Universal Clipboard Sync",
+                subtitle = "macOS ↔ Android",
+                checked = clipboardSyncEnabled,
+                onCheckedChange = onToggleClipboardSync
+            )
+            StitchSwitchCard(
+                title = "Notification Mirroring",
+                subtitle = "Interactive replies",
+                checked = notificationMirrorEnabled,
+                onCheckedChange = onToggleNotificationMirror
+            )
+
+            // Quick Actions Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = onScanQrClick,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = StitchTokens.PrimaryCrimson,
+                        contentColor = Color.White
+                    )
+                ) {
+                    Text("Scan Mac QR", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                }
+                OutlinedButton(
+                    onClick = onSyncClipboardClick,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, StitchTokens.OutlineVariant)
+                ) {
+                    Text("Sync Clip", fontSize = 12.sp, color = StitchTokens.OnSurface)
+                }
+                OutlinedButton(
+                    onClick = onNotificationAccessClick,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, StitchTokens.OutlineVariant)
+                ) {
+                    Text("Notifs", fontSize = 12.sp, color = StitchTokens.OnSurface)
+                }
+            }
+
+            // 4. Recent Notifications Feed (#E4E2DE replyable vs #1F2022 non-replyable)
+            Text(
+                text = "RECENT NOTIFICATIONS",
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                color = StitchTokens.SecondaryText
+            )
+
+            if (notifications.isEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = CardDefaults.cardColors(containerColor = StitchTokens.SurfaceContainer),
+                    border = BorderStroke(1.dp, StitchTokens.OutlineVariant)
+                ) {
+                    Text(
+                        text = "No mirrored notifications yet",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = StitchTokens.SecondaryText,
+                        modifier = Modifier.padding(14.dp)
+                    )
+                }
+            } else {
+                notifications.take(4).forEach { item ->
+                    if (item.canReply) {
+                        ReplyableNotificationCard(
+                            item = item,
+                            onSendReply = { text -> onSendInlineReply(item.sbnKey, text) }
+                        )
+                    } else {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = CardDefaults.cardColors(containerColor = StitchTokens.SurfaceContainer),
+                            border = BorderStroke(1.dp, StitchTokens.OutlineVariant)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                Text(
+                                    text = "${item.appName.uppercase()} • ${item.title}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = StitchTokens.SecondaryText
+                                )
+                                Text(
+                                    text = item.body,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = StitchTokens.OnSurface
+                                )
+                            }
+                        }
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.height(6.dp))
         }
     }
 }
 
 @Composable
-private fun IndustrialActionTile(
+private fun StitchSwitchCard(
     title: String,
     subtitle: String,
-    modifier: Modifier = Modifier,
-    borderColor: androidx.compose.ui.graphics.Color,
-    onClick: () -> Unit
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
 ) {
-    OutlinedButton(
-        onClick = onClick,
-        modifier = modifier.height(68.dp),
+    Card(
+        modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(10.dp),
-        border = BorderStroke(1.dp, borderColor)
+        colors = CardDefaults.cardColors(containerColor = StitchTokens.SurfaceContainer),
+        border = BorderStroke(1.dp, StitchTokens.OutlineVariant)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = StitchTokens.OnSurface
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = StitchTokens.SecondaryText
+                )
+            }
+            Switch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = StitchTokens.PrimaryCrimson,
+                    uncheckedThumbColor = StitchTokens.SecondaryText,
+                    uncheckedTrackColor = StitchTokens.SurfaceHigh
+                )
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReplyableNotificationCard(
+    item: NotificationEventPayload,
+    onSendReply: (String) -> Unit
+) {
+    var replyDraft by remember { mutableStateOf("") }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        colors = CardDefaults.cardColors(containerColor = StitchTokens.ActiveCardLight)
     ) {
         Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(2.dp)
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
-                text = title,
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                text = subtitle,
+                text = "${item.appName.uppercase()} • ${item.title}",
                 style = MaterialTheme.typography.labelSmall,
                 fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                fontWeight = FontWeight.Bold,
+                color = StitchTokens.ActiveCardInk.copy(alpha = 0.75f)
             )
+            Text(
+                text = item.body,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                color = StitchTokens.ActiveCardInk
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = replyDraft,
+                    onValueChange = { replyDraft = it },
+                    placeholder = { Text("Reply inline...", fontSize = 12.sp, color = StitchTokens.SecondaryText) },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = StitchTokens.SurfaceLowest,
+                        unfocusedContainerColor = StitchTokens.SurfaceLowest,
+                        focusedTextColor = StitchTokens.OnSurface,
+                        unfocusedTextColor = StitchTokens.OnSurface,
+                        focusedBorderColor = StitchTokens.PrimaryCrimson,
+                        unfocusedBorderColor = StitchTokens.OutlineVariant
+                    )
+                )
+                Button(
+                    onClick = {
+                        if (replyDraft.isNotBlank()) {
+                            onSendReply(replyDraft.trim())
+                            replyDraft = ""
+                        }
+                    },
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = StitchTokens.PrimaryCrimson,
+                        contentColor = Color.White
+                    )
+                ) {
+                    Text("Send", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
         }
     }
 }

@@ -2,226 +2,385 @@ import MacBridgeCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+enum StitchTokens {
+    static let surfaceLowest = Color(red: 0x0D/255.0, green: 0x0E/255.0, blue: 0x10/255.0)
+    static let surface = Color(red: 0x12/255.0, green: 0x13/255.0, blue: 0x15/255.0)
+    static let surfaceLow = Color(red: 0x1B/255.0, green: 0x1C/255.0, blue: 0x1E/255.0)
+    static let surfaceContainer = Color(red: 0x1F/255.0, green: 0x20/255.0, blue: 0x22/255.0)
+    static let surfaceHigh = Color(red: 0x29/255.0, green: 0x2A/255.0, blue: 0x2C/255.0)
+    static let surfaceHighest = Color(red: 0x34/255.0, green: 0x35/255.0, blue: 0x37/255.0)
+
+    static let primaryCrimson = Color(red: 0xE1/255.0, green: 0x1D/255.0, blue: 0x48/255.0)
+    static let tertiaryMint = Color(red: 0x74/255.0, green: 0xD8/255.0, blue: 0xBD/255.0)
+    static let activeCardLight = Color(red: 0xE4/255.0, green: 0xE2/255.0, blue: 0xDE/255.0)
+    static let activeCardInk = Color(red: 0x1B/255.0, green: 0x1C/255.0, blue: 0x1A/255.0)
+
+    static let outlineVariant = Color(red: 0x5C/255.0, green: 0x3F/255.0, blue: 0x40/255.0)
+    static let onSurface = Color(red: 0xE3/255.0, green: 0xE2/255.0, blue: 0xE4/255.0)
+    static let secondaryText = Color(red: 0xC8/255.0, green: 0xC6/255.0, blue: 0xC3/255.0)
+}
+
 struct MenuBarDashboardView: View {
     @ObservedObject var viewModel: BridgeDashboardViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            headerSection
-            Divider()
-            quickActionsGrid
-            dropZoneCard
-            if let transfer = viewModel.activeTransfer {
-                activeTransferCard(transfer)
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 12) {
+                headerSection
+                beamDropzoneCard
+                if let transfer = viewModel.activeTransfer {
+                    activeTransferCard(transfer)
+                }
+                featureSwitchesSection
+                quickControlsStrip
+                notificationsSection
             }
-            togglesSection
-            notificationsSection
-            footerSection
+            .padding(14)
+
+            bottomTelemetryBar
         }
-        .padding(14)
-        .frame(width: 340)
+        .frame(width: 360)
+        .background(StitchTokens.surface)
+        .foregroundStyle(StitchTokens.onSurface)
         .sheet(isPresented: $viewModel.isShowingPairingSheet) {
             PairingView(viewModel: viewModel)
         }
     }
 
+    // 1. Header: 40x40 circular battery progress ring (#74D8BD) + bolt + status pill
     private var headerSection: some View {
-        HStack(spacing: 10) {
-            Image(systemName: viewModel.menuBarSymbol)
-                .font(.title2)
-                .foregroundStyle(Color.accentColor)
+        HStack(spacing: 12) {
+            ZStack {
+                Circle()
+                    .stroke(StitchTokens.surfaceHigh, lineWidth: 3.5)
+                Circle()
+                    .trim(from: 0, to: CGFloat(max(0, min(100, viewModel.peerBatteryPercent))) / 100.0)
+                    .stroke(
+                        StitchTokens.tertiaryMint,
+                        style: StrokeStyle(lineWidth: 3.5, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+                Image(systemName: viewModel.peerIsCharging ? "bolt.fill" : "battery.100")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(StitchTokens.tertiaryMint)
+            }
+            .frame(width: 40, height: 40)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(viewModel.peerName)
-                    .font(.headline)
-                Text(viewModel.connectionBadgeText)
-                    .font(.caption.weight(.medium))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 2)
-                    .background(
-                        Capsule().fill(
-                            viewModel.bridgeState == .activeWifiStream
-                                ? Color.green.opacity(0.18)
-                                : Color.secondary.opacity(0.15)
-                        )
-                    )
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(StitchTokens.onSurface)
+                    .lineLimit(1)
+
+                let chargeTag = viewModel.peerIsCharging ? "CHARGING" : "BATTERY"
+                let pairTag = viewModel.peerPaired ? "PAIRED" : "UNPAIRED"
+                Text("\(viewModel.peerBatteryPercent)% \(chargeTag) • \(pairTag)")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(StitchTokens.secondaryText)
             }
 
             Spacer()
 
-            HStack(spacing: 4) {
-                if viewModel.peerIsCharging {
-                    Image(systemName: "bolt.fill")
-                        .foregroundStyle(.yellow)
-                }
-                Image(systemName: batteryIconName(for: viewModel.peerBatteryPercent))
-                Text("\(viewModel.peerBatteryPercent)%")
-                    .font(.subheadline.monospacedDigit())
-            }
+            let isTurbo = viewModel.bridgeState == .activeWifiStream
+            Text(isTurbo ? "WI-FI TURBO 5GHZ" : "BLE STANDBY")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    Capsule().fill(isTurbo ? StitchTokens.tertiaryMint.opacity(0.18) : StitchTokens.surfaceHigh)
+                )
+                .overlay(
+                    Capsule().stroke(isTurbo ? StitchTokens.tertiaryMint : StitchTokens.outlineVariant, lineWidth: 1)
+                )
+                .foregroundStyle(isTurbo ? StitchTokens.tertiaryMint : StitchTokens.onSurface)
         }
     }
 
-    private var quickActionsGrid: some View {
-        Grid(horizontalSpacing: 8, verticalSpacing: 8) {
-            GridRow {
-                Button {
-                    viewModel.openFilePickerAndSend()
-                } label: {
-                    Label("Send File", systemImage: "arrow.up.doc")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-
-                Button {
-                    viewModel.syncClipboardNow()
-                } label: {
-                    Label("Sync Clipboard", systemImage: "doc.on.clipboard")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
+    // 2. Dropzone / Beam Card (#0D0E10, dashed #5C3F40)
+    private var beamDropzoneCard: some View {
+        Button {
+            viewModel.openFilePickerAndSend()
+        } label: {
+            VStack(spacing: 6) {
+                Image(systemName: "arrow.up.doc.on.clipboard")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(viewModel.isDropTargeted ? StitchTokens.primaryCrimson : StitchTokens.tertiaryMint)
+                Text("Drop files to beam to Android")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(StitchTokens.onSurface)
+                Text("MAX 4.0 GB • DIRECT P2P")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(StitchTokens.secondaryText)
             }
-            GridRow {
-                Button {
-                    viewModel.ringMyPhone()
-                } label: {
-                    Label("Ring My Phone", systemImage: "bell.and.waves.left.and.right")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    viewModel.startPairingFlow()
-                } label: {
-                    Label("Pair New Device", systemImage: "qrcode")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-            }
-        }
-    }
-
-    private var dropZoneCard: some View {
-        RoundedRectangle(cornerRadius: 10)
-            .strokeBorder(
-                viewModel.isDropTargeted ? Color.accentColor : Color.secondary.opacity(0.35),
-                style: StrokeStyle(lineWidth: 1.5, dash: [5, 4])
-            )
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 14)
             .background(
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(viewModel.isDropTargeted ? Color.accentColor.opacity(0.08) : Color.clear)
+                    .fill(viewModel.isDropTargeted ? StitchTokens.primaryCrimson.opacity(0.12) : StitchTokens.surfaceLowest)
             )
-            .frame(height: 44)
-            .overlay {
-                Label("Drop a file here to AirDrop to Android", systemImage: "tray.and.arrow.up")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .onDrop(of: [.fileURL], isTargeted: $viewModel.isDropTargeted) { providers in
-                guard let provider = providers.first else { return false }
-                _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                    guard let url else { return }
-                    Task { @MainActor in
-                        viewModel.sendFile(url: url)
-                    }
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(
+                        viewModel.isDropTargeted ? StitchTokens.primaryCrimson : StitchTokens.outlineVariant,
+                        style: StrokeStyle(lineWidth: 1, dash: [5, 4])
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .onDrop(of: [.fileURL], isTargeted: $viewModel.isDropTargeted) { providers in
+            guard let provider = providers.first else { return false }
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                Task { @MainActor in
+                    viewModel.sendFile(url: url)
                 }
-                return true
             }
+            return true
+        }
     }
 
     private func activeTransferCard(_ transfer: FileTransferProgress) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(transfer.filename)
-                    .font(.caption.weight(.semibold))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(StitchTokens.onSurface)
                     .lineLimit(1)
                 Spacer()
-                Button("Cancel") {
+                Button("CANCEL") {
                     viewModel.cancelActiveTransfer()
                 }
-                .font(.caption)
-                .buttonStyle(.borderless)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(StitchTokens.primaryCrimson)
+                .buttonStyle(.plain)
             }
             ProgressView(value: transfer.fractionCompleted)
+                .tint(StitchTokens.primaryCrimson)
             HStack {
                 Text("\(transfer.bytesTransferred / 1024) / \(transfer.totalBytes / 1024) KB")
                 Spacer()
                 Text(String(format: "%.1f MB/s", transfer.bytesPerSecond / 1_048_576))
             }
-            .font(.caption2.monospacedDigit())
-            .foregroundStyle(.secondary)
+            .font(.system(size: 10, design: .monospaced))
+            .foregroundStyle(StitchTokens.secondaryText)
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.1)))
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(StitchTokens.surfaceContainer)
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(StitchTokens.outlineVariant, lineWidth: 1))
+        )
     }
 
-    private var togglesSection: some View {
-        VStack(spacing: 6) {
-            Toggle(
-                "Clipboard Sync",
+    // 3. Two #1F2022 Feature Switch Cards
+    private var featureSwitchesSection: some View {
+        VStack(spacing: 8) {
+            stitchToggleCard(
+                title: "Universal Clipboard Sync",
+                subtitle: "macOS ↔ Android",
                 isOn: Binding(
                     get: { viewModel.clipboardSyncEnabled },
                     set: { viewModel.toggleClipboardSync($0) }
                 )
             )
-            Toggle(
-                "Notification Mirroring",
+            stitchToggleCard(
+                title: "Notification Mirroring",
+                subtitle: "Interactive replies",
                 isOn: Binding(
                     get: { viewModel.notificationMirrorEnabled },
                     set: { viewModel.toggleNotificationMirror($0) }
                 )
             )
         }
-        .toggleStyle(.switch)
-        .font(.subheadline)
     }
 
+    private func stitchToggleCard(title: String, subtitle: String, isOn: Binding<Bool>) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(StitchTokens.onSurface)
+                Text(subtitle)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(StitchTokens.secondaryText)
+            }
+            Spacer()
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .tint(StitchTokens.primaryCrimson)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(StitchTokens.surfaceContainer)
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(StitchTokens.outlineVariant, lineWidth: 1))
+        )
+    }
+
+    private var quickControlsStrip: some View {
+        HStack(spacing: 8) {
+            Button {
+                viewModel.syncClipboardNow()
+            } label: {
+                Label("Sync Clip", systemImage: "doc.on.clipboard")
+                    .font(.system(size: 11, weight: .medium))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .tint(StitchTokens.surfaceHighest)
+
+            Button {
+                viewModel.ringMyPhone()
+            } label: {
+                Label("Ring", systemImage: "bell.and.waves.left.and.right")
+                    .font(.system(size: 11, weight: .medium))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .tint(StitchTokens.surfaceHighest)
+
+            Button {
+                viewModel.startPairingFlow()
+            } label: {
+                Label("Pair QR", systemImage: "qrcode")
+                    .font(.system(size: 11, weight: .medium))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .tint(StitchTokens.primaryCrimson)
+        }
+    }
+
+    // 4. Recent Notifications Feed (#E4E2DE replyable vs #1F2022 non-replyable)
     private var notificationsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Recent Mirrored Notifications")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("RECENT NOTIFICATIONS")
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(StitchTokens.secondaryText)
+
             if viewModel.recentNotifications.isEmpty {
                 Text("No mirrored notifications yet")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(StitchTokens.secondaryText.opacity(0.75))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(StitchTokens.surfaceContainer)
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(StitchTokens.outlineVariant, lineWidth: 1))
+                    )
             } else {
-                ForEach(viewModel.recentNotifications.prefix(3)) { item in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("\(item.appName) · \(item.title)")
-                            .font(.caption.weight(.medium))
-                            .lineLimit(1)
-                        Text(item.body)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                ForEach(viewModel.recentNotifications.prefix(2)) { item in
+                    if item.canReply {
+                        ReplyableNotificationCard(item: item) { replyText in
+                            viewModel.sendNotificationReply(sbnKey: item.id, replyText: replyText)
+                        }
+                    } else {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("\(item.appName.uppercased()) • \(item.title)")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .foregroundStyle(StitchTokens.secondaryText)
+                                .lineLimit(1)
+                            Text(item.body)
+                                .font(.system(size: 12))
+                                .foregroundStyle(StitchTokens.onSurface)
+                                .lineLimit(2)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(StitchTokens.surfaceContainer)
+                                .overlay(RoundedRectangle(cornerRadius: 10).stroke(StitchTokens.outlineVariant, lineWidth: 1))
+                        )
                     }
                 }
             }
         }
     }
 
-    private var footerSection: some View {
+    // 5. Bottom Telemetry Bar (#0D0E10)
+    private var bottomTelemetryBar: some View {
         HStack {
-            Text(viewModel.statusBanner ?? "mTLS 1.3 · Keychain Pinned")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            let latText = viewModel.latencyMs.map { "\($0)MS" } ?? "-- MS"
+            Text("LATENCY: \(latText)")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(StitchTokens.tertiaryMint)
+
             Spacer()
-            Button("Quit") {
+
+            Text("E2EE: TLS 1.3 PINNED")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(StitchTokens.secondaryText)
+
+            Button {
                 NSApplication.shared.terminate(nil)
+            } label: {
+                Image(systemName: "power")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(StitchTokens.secondaryText)
             }
             .buttonStyle(.plain)
-            .font(.caption)
+            .padding(.leading, 8)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(StitchTokens.surfaceLowest)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(StitchTokens.outlineVariant)
+                .frame(height: 1)
         }
     }
+}
 
-    private func batteryIconName(for level: Int) -> String {
-        switch level {
-        case 88...100: return "battery.100"
-        case 63..<88: return "battery.75"
-        case 38..<63: return "battery.50"
-        case 13..<38: return "battery.25"
-        default: return "battery.0"
+private struct ReplyableNotificationCard: View {
+    let item: MirroredNotificationItem
+    let onSendReply: (String) -> Void
+    @StateObject private var replyState = InlineReplyBoxModel()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("\(item.appName.uppercased()) • \(item.title)")
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(StitchTokens.activeCardInk.opacity(0.75))
+                .lineLimit(1)
+
+            Text(item.body)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(StitchTokens.activeCardInk)
+                .lineLimit(2)
+
+            HStack(spacing: 6) {
+                TextField("Reply inline...", text: $replyState.text)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11))
+                    .foregroundStyle(StitchTokens.onSurface)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(StitchTokens.surfaceLowest))
+
+                Button("Send") {
+                    onSendReply(replyState.text)
+                    replyState.text = ""
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 6).fill(StitchTokens.primaryCrimson))
+                .foregroundStyle(Color.white)
+                .buttonStyle(.plain)
+            }
         }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(StitchTokens.activeCardLight))
     }
+}
+
+@MainActor
+private final class InlineReplyBoxModel: ObservableObject {
+    @Published var text: String = ""
 }

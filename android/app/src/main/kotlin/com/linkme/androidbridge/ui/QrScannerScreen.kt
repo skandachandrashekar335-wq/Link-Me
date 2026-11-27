@@ -30,10 +30,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.linkme.androidbridge.core.crypto.PairingCrypto
 import com.linkme.androidbridge.core.crypto.PairingUriPayload
-import com.linkme.androidbridge.ui.theme.WarmIndustrialPalette
+import com.linkme.androidbridge.ui.theme.StitchTokens
 
 /**
- * Feature 1 (Android): Warm Industrial QR pairing & 6-digit SAS confirmation screen.
+ * Feature 1 (Android): Google Stitch QR pairing & 6-digit SAS confirmation screen.
  */
 @Composable
 fun QrScannerScreen(
@@ -52,7 +52,7 @@ fun QrScannerScreen(
     var parsedPeerId by remember { mutableStateOf<String?>(null) }
     var derivedBleSecret by remember { mutableStateOf<ByteArray?>(null) }
 
-    Scaffold(containerColor = MaterialTheme.colorScheme.background) { innerPadding ->
+    Scaffold(containerColor = StitchTokens.Surface) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -65,23 +65,23 @@ fun QrScannerScreen(
                 text = "CURVE25519 // QR PAIRING",
                 style = MaterialTheme.typography.labelMedium,
                 fontFamily = FontFamily.Monospace,
-                color = WarmIndustrialPalette.CrimsonAccent,
+                color = StitchTokens.PrimaryCrimson,
                 fontWeight = FontWeight.Bold
             )
-            Text("Scan MacBridge QR", style = MaterialTheme.typography.headlineSmall)
+            Text("Scan MacBridge QR", style = MaterialTheme.typography.headlineSmall, color = StitchTokens.OnSurface)
 
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(10.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                colors = CardDefaults.cardColors(containerColor = StitchTokens.SurfaceContainer),
+                border = BorderStroke(1.dp, StitchTokens.OutlineVariant)
             ) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Out-of-Band X25519 Bootstrap", style = MaterialTheme.typography.titleSmall)
+                    Text("Out-of-Band X25519 Bootstrap", style = MaterialTheme.typography.titleSmall, color = StitchTokens.OnSurface)
                     Text(
                         "Scan MacBridge's pairing QR or paste an andromac://pair URI below for emulator verification.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = StitchTokens.SecondaryText
                     )
                 }
             }
@@ -120,7 +120,7 @@ fun QrScannerScreen(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(10.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = WarmIndustrialPalette.CrimsonAccent,
+                    containerColor = StitchTokens.PrimaryCrimson,
                     contentColor = Color.White
                 )
             ) {
@@ -135,8 +135,8 @@ fun QrScannerScreen(
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    border = BorderStroke(1.dp, WarmIndustrialPalette.CrimsonAccent)
+                    colors = CardDefaults.cardColors(containerColor = StitchTokens.SurfaceContainer),
+                    border = BorderStroke(1.dp, StitchTokens.PrimaryCrimson)
                 ) {
                     Column(
                         modifier = Modifier
@@ -145,12 +145,13 @@ fun QrScannerScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text("VERIFY MATCHING SAS ON MAC", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+                        Text("VERIFY MATCHING SAS ON MAC", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, color = StitchTokens.SecondaryText)
                         Text(
                             text = sas,
                             style = MaterialTheme.typography.displayMedium,
                             fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            color = StitchTokens.TertiaryMint
                         )
                     }
                 }
@@ -168,7 +169,7 @@ fun QrScannerScreen(
                             onConfirmTrustedPeer(peerId, "Paired Mac", cleanFp, secret)
                         },
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = WarmIndustrialPalette.CrimsonAccent,
+                            containerColor = StitchTokens.PrimaryCrimson,
                             contentColor = Color.White
                         )
                     ) {

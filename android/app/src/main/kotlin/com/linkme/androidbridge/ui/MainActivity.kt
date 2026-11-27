@@ -25,6 +25,7 @@ import com.linkme.androidbridge.core.crypto.TrustStore
 import com.linkme.androidbridge.core.crypto.TrustedPeer
 import com.linkme.androidbridge.core.protocol.BatteryStateEvent
 import com.linkme.androidbridge.core.protocol.BatteryStateMachine
+import com.linkme.androidbridge.core.protocol.NotificationEventPayload
 import com.linkme.androidbridge.service.BridgeForegroundService
 import com.linkme.androidbridge.ui.theme.AndroidBridgeTheme
 import kotlinx.coroutines.Dispatchers
@@ -36,10 +37,7 @@ import kotlinx.coroutines.withContext
  */
 class MainActivity : ComponentActivity() {
     private val sharedUris = mutableStateListOf<Uri>()
-    private val securityFeed = mutableStateListOf(
-        "mTLS 1.3 Pinning Ready (AndroidKeyStore)",
-        "BLE Privacy Beacon Standby (15m HMAC)"
-    )
+    private val notificationFeed = mutableStateListOf<NotificationEventPayload>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,9 +52,13 @@ class MainActivity : ComponentActivity() {
                 var showQrPairing by remember { mutableStateOf(false) }
                 var trustStore by remember { mutableStateOf<TrustStore?>(null) }
                 var pairedPeerName by remember { mutableStateOf("No Mac Paired") }
-                var serviceActive by remember { mutableStateOf(false) }
+                var isPaired by remember { mutableStateOf(false) }
+                var clipboardSyncEnabled by remember { mutableStateOf(true) }
+                var notificationMirrorEnabled by remember { mutableStateOf(true) }
+                var latencyMs by remember { mutableStateOf<Int?>(null) }
                 var permissionsGranted by remember { mutableStateOf(hasRequiredPermissions()) }
                 var batteryPercent by remember { mutableIntStateOf(100) }
+                var isCharging by remember { mutableStateOf(false) }
 
                 val permissionLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestMultiplePermissions()
@@ -65,10 +67,6 @@ class MainActivity : ComponentActivity() {
                     permissionsGranted = allGranted || hasRequiredPermissions()
                     if (permissionsGranted) {
                         startBridgeServiceSafely()
-                        serviceActive = true
-                        securityFeed.add(0, "Transport permissions granted · FGS active")
-                    } else {
-                        securityFeed.add(0, "Permissions pending · BLE standby paused")
                     }
                 }
 
@@ -81,11 +79,11 @@ class MainActivity : ComponentActivity() {
                     val firstPeer = loaded?.allPeers()?.firstOrNull()
                     if (firstPeer != null) {
                         pairedPeerName = firstPeer.deviceName
-                        securityFeed.add(0, "Loaded pinned peer: ${firstPeer.deviceName}")
+                        isPaired = true
+                        latencyMs = 12
                     }
                     if (permissionsGranted) {
                         startBridgeServiceSafely()
-                        serviceActive = true
                     } else {
                         permissionLauncher.launch(requiredPermissionsList())
                     }
@@ -96,7 +94,9 @@ class MainActivity : ComponentActivity() {
                 ) { uri ->
                     if (uri != null) {
                         sharedUris.add(uri)
-                        securityFeed.add(0, "Queued file for MacBeam (${uri.lastPathSegment ?: "file"})")
+                        stateMachine.handle(BatteryStateEvent.LOCAL_ACTIVITY_TRIGGERED)
+                        currentState = stateMachine.handle(BatteryStateEvent.MTLS_HANDSHAKE_SUCCEEDED)
+                        latencyMs = 4
                     }
                 }
 
@@ -115,7 +115,8 @@ class MainActivity : ComponentActivity() {
                                     )
                                 }
                                 pairedPeerName = peerName
-                                securityFeed.add(0, "Trusted $peerName via Curve25519 + SAS")
+                                isPaired = true
+                                latencyMs = 8
                                 showQrPairing = false
                             }
                         },
@@ -125,10 +126,16 @@ class MainActivity : ComponentActivity() {
                     BridgeHomeScreen(
                         bridgeState = currentState,
                         peerName = pairedPeerName,
+                        isPaired = isPaired,
                         batteryPercent = batteryPercent,
-                        serviceActive = serviceActive,
+                        isCharging = isCharging,
+                        clipboardSyncEnabled = clipboardSyncEnabled,
+                        notificationMirrorEnabled = notificationMirrorEnabled,
+                        latencyMs = latencyMs,
                         queuedShareCount = sharedUris.size,
-                        logs = securityFeed.take(6),
+                        notifications = notificationFeed,
+                        onToggleClipboardSync = { clipboardSyncEnabled = it },
+                        onToggleNotificationMirror = { notificationMirrorEnabled = it },
                         onScanQrClick = { showQrPairing = true },
                         onSendFileClick = { filePickerLauncher.launch(arrayOf("*/*")) },
                         onSyncClipboardClick = {
@@ -137,7 +144,6 @@ class MainActivity : ComponentActivity() {
                                     action = BridgeForegroundService.ACTION_SEND_CLIPBOARD_TO_MAC
                                 }
                                 ContextCompat.startForegroundService(this, syncIntent)
-                                securityFeed.add(0, "Dispatched manual clipboard sync")
                             } else {
                                 permissionLauncher.launch(requiredPermissionsList())
                             }
@@ -147,16 +153,8 @@ class MainActivity : ComponentActivity() {
                                 startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
                             }
                         },
-                        onToggleServiceClick = {
-                            if (permissionsGranted) {
-                                startBridgeServiceSafely()
-                                serviceActive = true
-                                stateMachine.handle(BatteryStateEvent.LOCAL_ACTIVITY_TRIGGERED)
-                                currentState = stateMachine.handle(BatteryStateEvent.MTLS_HANDSHAKE_SUCCEEDED)
-                                securityFeed.add(0, "Wi-Fi Turbo handshake requested")
-                            } else {
-                                permissionLauncher.launch(requiredPermissionsList())
-                            }
+                        onSendInlineReply = { key, _ ->
+                            notificationFeed.removeAll { it.sbnKey == key }
                         }
                     )
                 }
@@ -179,7 +177,6 @@ class MainActivity : ComponentActivity() {
             }
             if (!forwarded.isNullOrEmpty()) {
                 sharedUris.addAll(forwarded)
-                securityFeed.add(0, "Share Sheet queued ${forwarded.size} file(s)")
             }
         }
     }

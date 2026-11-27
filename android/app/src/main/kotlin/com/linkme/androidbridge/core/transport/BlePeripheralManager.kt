@@ -337,7 +337,7 @@ class BlePeripheralManager(
                             val result = reassembler.ingest(value)
                             result.ack?.let { ack ->
                                 notifyCharacteristic?.let { nc ->
-                                    notifyBytes(server, device, nc, ack.encode())
+                                    gattServer?.let { server -> notifyBytes(server, device, nc, ack.encode()) }
                                 }
                             }
                             result.completeEnvelope?.let { env ->

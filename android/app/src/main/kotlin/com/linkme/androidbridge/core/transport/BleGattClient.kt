@@ -249,27 +249,52 @@ class BleGattClient(
 
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) return
             val service = gatt.getService(BlePeripheralManager.SERVICE_UUID) ?: return
             rxWriteChar = service.getCharacteristic(BlePeripheralManager.CONTROL_WRITE_CHAR_UUID)
             txNotifyChar = service.getCharacteristic(BlePeripheralManager.CONTROL_NOTIFY_CHAR_UUID)
             l2capPsmChar = service.getCharacteristic(BlePeripheralManager.L2CAP_PSM_CHAR_UUID)
 
-            txNotifyChar?.let { notifyChar ->
+            val notifyChar = txNotifyChar
+            if (notifyChar != null) {
                 gatt.setCharacteristicNotification(notifyChar, true)
                 val cccd = notifyChar.getDescriptor(UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"))
                 if (cccd != null) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        gatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                    val queued = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        gatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == 0
                     } else {
                         @Suppress("DEPRECATION")
                         cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                         @Suppress("DEPRECATION")
                         gatt.writeDescriptor(cccd)
                     }
+                    if (queued) {
+                        return
+                    }
                 }
             }
-            l2capPsmChar?.let { psmChar -> gatt.readCharacteristic(psmChar) }
-            flushPendingHandshake()
+            readPsmOrFlush(gatt)
+        }
+
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int
+        ) {
+            readPsmOrFlush(gatt)
+        }
+
+        @SuppressLint("MissingPermission")
+        private fun readPsmOrFlush(gatt: BluetoothGatt) {
+            val psmChar = l2capPsmChar
+            if (psmChar != null && gatt.readCharacteristic(psmChar)) {
+                return
+            }
+            flushPendingHandshakeAsync()
+        }
+
+        private fun flushPendingHandshakeAsync() {
+            scheduler.execute { flushPendingHandshake() }
         }
 
         @SuppressLint("MissingPermission")
@@ -279,7 +304,10 @@ class BleGattClient(
             value: ByteArray,
             status: Int
         ) {
-            handlePsmRead(gatt.device, characteristic, value)
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                handlePsmRead(gatt.device, characteristic, value)
+            }
+            flushPendingHandshakeAsync()
         }
 
         @Suppress("DEPRECATION")
@@ -288,8 +316,11 @@ class BleGattClient(
             characteristic: BluetoothGattCharacteristic,
             status: Int
         ) {
-            val bytes = characteristic.value ?: return
-            handlePsmRead(gatt.device, characteristic, bytes)
+            val bytes = characteristic.value
+            if (status == BluetoothGatt.GATT_SUCCESS && bytes != null) {
+                handlePsmRead(gatt.device, characteristic, bytes)
+            }
+            flushPendingHandshakeAsync()
         }
 
         @SuppressLint("MissingPermission")

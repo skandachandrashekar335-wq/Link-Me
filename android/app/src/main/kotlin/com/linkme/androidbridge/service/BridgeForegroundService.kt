@@ -208,8 +208,17 @@ class BridgeForegroundService : Service() {
                 },
                 wifiOpener = { startOnDemandWifiServer() },
                 wifiSender = { frame ->
-                    val client = wifiTlsClient ?: error("Wi-Fi peer client not connected")
-                    client.send(frame)
+                    val client = wifiTlsClient
+                    if (client != null) {
+                        client.send(frame)
+                    } else {
+                        val server = wifiTlsServer
+                        if (server != null && server.waitForClient(1800L)) {
+                            server.send(frame)
+                        } else {
+                            error("Wi-Fi peer socket not connected")
+                        }
+                    }
                 },
                 wifiCloser = { stopWifiTransport() }
             )
@@ -626,7 +635,9 @@ class BridgeForegroundService : Service() {
                         val peerId = store?.allPeers()?.firstOrNull()?.deviceId
                         if (hostHint != null && wake.servicePort in 1024..65535 && idMgr != null && peerId != null) {
                             runCatching {
-                                val client = WifiTlsClient(idMgr, store, peerId)
+                                val client = WifiTlsClient(idMgr, store, peerId) { inbound ->
+                                    serviceScope.launch { runCatching { routeInboundFrame(inbound) } }
+                                }
                                 client.connect(hostHint, wake.servicePort)
                                 wifiTlsClient = client
                                 BridgeActivityHub.updateConnectionState(wifiActive = true)

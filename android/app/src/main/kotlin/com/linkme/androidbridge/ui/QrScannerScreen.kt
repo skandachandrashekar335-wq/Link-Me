@@ -122,7 +122,8 @@ fun QrScannerScreen(
         deviceName: String,
         pinnedCertSha256: String,
         sharedBleSecret: ByteArray,
-        bluetoothSessionKey: ByteArray
+        bluetoothSessionKey: ByteArray,
+        onPersisted: () -> Unit
     ) -> Unit,
     onCancel: () -> Unit
 ) {
@@ -594,8 +595,9 @@ fun QrScannerScreen(
                                 active.pinnedCertSha256,
                                 active.sharedBleSecret,
                                 active.sessionKey
-                            )
-                            BridgeActivityHub.onSendPairCommit?.invoke(commit, active.lanHost, active.tcpPort)
+                            ) {
+                                BridgeActivityHub.onSendPairCommit?.invoke(commit, active.lanHost, active.tcpPort)
+                            }
                         },
                         modifier = Modifier
                             .fillMaxWidth()

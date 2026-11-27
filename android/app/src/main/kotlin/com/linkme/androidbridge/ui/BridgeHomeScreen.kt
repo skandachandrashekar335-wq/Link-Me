@@ -126,7 +126,7 @@ fun BridgeHomeScreen(
     activities: List<BridgeActivityItem>,
     onToggleClipboardSync: (Boolean) -> Unit,
     onToggleNotificationMirror: (Boolean) -> Unit,
-    onConfirmTrustedPeer: (String, String, String, ByteArray, ByteArray) -> Unit,
+    onConfirmTrustedPeer: (String, String, String, ByteArray, ByteArray, () -> Unit) -> Unit,
     onSendFileClick: () -> Unit,
     onSendUrlClick: () -> Unit,
     onRingMacClick: () -> Unit,
@@ -298,9 +298,11 @@ fun BridgeHomeScreen(
                 AndroidStudioTab.SCAN_QR -> {
                     Box(modifier = Modifier.padding(16.dp)) {
                         QrScannerScreen(
-                            onConfirmTrustedPeer = { id, name, fp, bleSec, btKey ->
-                                onConfirmTrustedPeer(id, name, fp, bleSec, btKey)
-                                currentTab = AndroidStudioTab.HOME
+                            onConfirmTrustedPeer = { id, name, fp, bleSec, btKey, onPersisted ->
+                                onConfirmTrustedPeer(id, name, fp, bleSec, btKey) {
+                                    onPersisted()
+                                    currentTab = AndroidStudioTab.HOME
+                                }
                             },
                             onCancel = { currentTab = AndroidStudioTab.HOME }
                         )

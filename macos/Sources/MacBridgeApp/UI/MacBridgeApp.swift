@@ -345,8 +345,12 @@ final class BridgeDashboardViewModel: ObservableObject {
             await self.clipboardManager.setPeerReachable(self.peerPaired)
             try? await self.pairingFeature.startTemporaryListener(
                 onReadyPort: { [weak self] port in
-                    Task { @MainActor in
-                        self?.localListeningPort = port
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.localListeningPort = port
+                        if !self.peerPaired {
+                            await self.refreshPairingSession()
+                        }
                     }
                 },
                 onPairHelloReceived: { [weak self] hello in
@@ -603,10 +607,21 @@ final class BridgeDashboardViewModel: ObservableObject {
     }
 
     private func sendOverWifi(_ frame: WireFrame) async throws {
-        guard let client = wifiTlsClient else {
-            throw WifiTlsError.connectionClosed
+        if let client = wifiTlsClient {
+            try await client.send(frame: frame)
+            return
         }
-        try await client.send(frame: frame)
+        if let server = wifiTlsServer {
+            if !server.hasActiveClients {
+                let connected = await server.waitForClientConnection(timeoutSeconds: 1.8)
+                guard connected else {
+                    throw WifiTlsError.connectionClosed
+                }
+            }
+            try await server.send(frame: frame)
+            return
+        }
+        throw WifiTlsError.connectionClosed
     }
 
     private func closeWifiTransport() async {
@@ -675,6 +690,9 @@ final class BridgeDashboardViewModel: ObservableObject {
                     expectedPeerDeviceId: peer.deviceId,
                     trustStore: trustStore
                 )
+                client.onFrameReceived = { [weak self] inbound in
+                    Task { await self?.handleInboundFrame(inbound) }
+                }
                 if (try? await client.connect(host: hostHint, port: wake.servicePort)) != nil {
                     wifiTlsClient = client
                     bridgeState = .activeWifiStream

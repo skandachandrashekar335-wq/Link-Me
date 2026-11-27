@@ -185,7 +185,7 @@ class MainActivity : ComponentActivity() {
                     activities = activities,
                     onToggleClipboardSync = { clipboardSyncEnabled = it },
                     onToggleNotificationMirror = { notificationMirrorEnabled = it },
-                    onConfirmTrustedPeer = { peerId, peerName, certSha256, bleSecret, btSessionKey ->
+                    onConfirmTrustedPeer = { peerId, peerName, certSha256, bleSecret, btSessionKey, onPersisted ->
                         scope.launch {
                             withContext(Dispatchers.IO) {
                                 trustStore?.savePeer(
@@ -202,6 +202,7 @@ class MainActivity : ComponentActivity() {
                             pairedPeerFingerprint = certSha256
                             isPaired = true
                             BridgeActivityHub.onPeerTrustedUpdated?.invoke()
+                            onPersisted()
                         }
                     },
                     onSendFileClick = { filePickerLauncher.launch(arrayOf("*/*")) },

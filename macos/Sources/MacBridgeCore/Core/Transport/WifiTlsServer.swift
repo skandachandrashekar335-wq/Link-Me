@@ -17,11 +17,20 @@ public final class WifiTlsServer: @unchecked Sendable {
     private let expectedPeerDeviceId: String
     private let trustStore: TrustStore
     private let queue = DispatchQueue(label: "com.linkme.macbridge.wifi.tls.server")
+    private let stateLock = NSLock()
     private var listener: NWListener?
     private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
+    private var readyConnections: [ObjectIdentifier: NWConnection] = [:]
+    private var clientWaiters: [(UUID, WaiterBox)] = []
 
     public var onFrameReceived: (@Sendable (WireFrame) -> Void)?
     public var onClientConnected: (@Sendable () -> Void)?
+
+    public var hasActiveClients: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return !readyConnections.isEmpty
+    }
 
     public init(
         identity: DeviceIdentity,
@@ -89,7 +98,89 @@ public final class WifiTlsServer: @unchecked Sendable {
         return boundPort
     }
 
+    private final class WaiterBox: @unchecked Sendable {
+        let lock = NSLock()
+        var resumed = false
+        var continuation: CheckedContinuation<Bool, Never>?
+
+        func finish(_ value: Bool) {
+            lock.lock()
+            guard !resumed, let cont = continuation else {
+                lock.unlock()
+                return
+            }
+            resumed = true
+            continuation = nil
+            lock.unlock()
+            cont.resume(returning: value)
+        }
+    }
+
+    public func waitForClientConnection(timeoutSeconds: TimeInterval = 2.0) async -> Bool {
+        if hasActiveClients {
+            return true
+        }
+        let box = WaiterBox()
+        return await withCheckedContinuation { continuation in
+            box.lock.lock()
+            box.continuation = continuation
+            box.lock.unlock()
+
+            stateLock.lock()
+            if !readyConnections.isEmpty {
+                stateLock.unlock()
+                box.finish(true)
+                return
+            }
+            clientWaiters.append((UUID(), box))
+            stateLock.unlock()
+
+            queue.asyncAfter(deadline: .now() + timeoutSeconds) { [weak self] in
+                guard let self else {
+                    box.finish(false)
+                    return
+                }
+                self.stateLock.lock()
+                self.clientWaiters.removeAll { $0.1 === box }
+                let ready = !self.readyConnections.isEmpty
+                self.stateLock.unlock()
+                box.finish(ready)
+            }
+        }
+    }
+
+    private func firstReadyConnection() -> NWConnection? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return readyConnections.values.first
+    }
+
+    public func send(frame: WireFrame) async throws {
+        guard let conn = firstReadyConnection() else {
+            throw WifiTlsError.connectionClosed
+        }
+        let encoded = FrameEncoder.encode(frame)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            conn.send(content: encoded, completion: .contentProcessed { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: ())
+                }
+            })
+        }
+    }
+
     public func stop() {
+        stateLock.lock()
+        readyConnections.removeAll()
+        let waiters = clientWaiters
+        clientWaiters.removeAll()
+        stateLock.unlock()
+        for (_, box) in waiters {
+            box.finish(false)
+        }
+
         queue.async { [weak self] in
             guard let self else { return }
             for conn in self.activeConnections.values {
@@ -121,12 +212,24 @@ public final class WifiTlsServer: @unchecked Sendable {
         let processor = ConnectionStreamProcessor()
 
         connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
             switch state {
             case .ready:
-                self?.onClientConnected?()
-                self?.receiveLoop(on: connection, processor: processor)
+                self.stateLock.lock()
+                self.readyConnections[key] = connection
+                let waiters = self.clientWaiters
+                self.clientWaiters.removeAll()
+                self.stateLock.unlock()
+                for (_, box) in waiters {
+                    box.finish(true)
+                }
+                self.onClientConnected?()
+                self.receiveLoop(on: connection, processor: processor)
             case .failed, .cancelled:
-                self?.activeConnections.removeValue(forKey: key)
+                self.stateLock.lock()
+                self.readyConnections.removeValue(forKey: key)
+                self.stateLock.unlock()
+                self.activeConnections.removeValue(forKey: key)
             default:
                 break
             }

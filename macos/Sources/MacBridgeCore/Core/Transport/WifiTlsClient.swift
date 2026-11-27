@@ -10,6 +10,8 @@ public final class WifiTlsClient: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.linkme.macbridge.wifi.tls.client")
     private var connection: NWConnection?
 
+    public var onFrameReceived: (@Sendable (WireFrame) -> Void)?
+
     public init(
         identity: DeviceIdentity,
         expectedPeerDeviceId: String,
@@ -18,6 +20,20 @@ public final class WifiTlsClient: @unchecked Sendable {
         self.identity = identity
         self.expectedPeerDeviceId = expectedPeerDeviceId
         self.trustStore = trustStore
+    }
+
+    private actor ClientStreamProcessor {
+        private var decoder = FrameDecoder()
+        private let replayGuard = ReplayGuard()
+
+        func process(_ data: Data) async throws -> [WireFrame] {
+            decoder.append(data)
+            let frames = try decoder.drainFrames()
+            for frame in frames {
+                try await replayGuard.validateAndAccept(frame.sequenceId)
+            }
+            return frames
+        }
     }
 
     public func connect(host: String, port: UInt16) async throws {
@@ -34,6 +50,7 @@ public final class WifiTlsClient: @unchecked Sendable {
         )
         let conn = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
         self.connection = conn
+        let processor = ClientStreamProcessor()
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             final class ResumeBox: @unchecked Sendable {
@@ -42,33 +59,79 @@ public final class WifiTlsClient: @unchecked Sendable {
             }
             let box = ResumeBox()
 
-            conn.stateUpdateHandler = { state in
+            conn.stateUpdateHandler = { [weak self] state in
                 box.lock.lock()
-                defer { box.lock.unlock() }
-                guard !box.resumed else { return }
-
-                switch state {
-                case .ready:
-                    box.resumed = true
-                    continuation.resume(returning: ())
-                case .failed(let err):
-                    box.resumed = true
-                    continuation.resume(throwing: WifiTlsError.handshakeOrPinningFailed(err.localizedDescription))
-                case .waiting(let err):
-                    // Immediate TLS error surfaces on .waiting when local cert/pin fails
-                    if case .tls = err {
+                let alreadyResumed = box.resumed
+                if !alreadyResumed {
+                    switch state {
+                    case .ready:
                         box.resumed = true
-                        conn.cancel()
+                        box.lock.unlock()
+                        self?.receiveLoop(on: conn, processor: processor)
+                        continuation.resume(returning: ())
+                        return
+                    case .failed(let err):
+                        box.resumed = true
+                        box.lock.unlock()
                         continuation.resume(throwing: WifiTlsError.handshakeOrPinningFailed(err.localizedDescription))
+                        return
+                    case .waiting(let err):
+                        // Immediate TLS error surfaces on .waiting when local cert/pin fails
+                        if case .tls = err {
+                            box.resumed = true
+                            box.lock.unlock()
+                            conn.cancel()
+                            continuation.resume(throwing: WifiTlsError.handshakeOrPinningFailed(err.localizedDescription))
+                            return
+                        }
+                    case .cancelled:
+                        box.resumed = true
+                        box.lock.unlock()
+                        continuation.resume(throwing: WifiTlsError.connectionClosed)
+                        return
+                    default:
+                        break
                     }
-                case .cancelled:
-                    box.resumed = true
-                    continuation.resume(throwing: WifiTlsError.connectionClosed)
-                default:
-                    break
+                }
+                box.lock.unlock()
+
+                if case .failed = state {
+                    conn.cancel()
                 }
             }
             conn.start(queue: queue)
+        }
+    }
+
+    private func receiveLoop(
+        on conn: NWConnection,
+        processor: ClientStreamProcessor
+    ) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            if let data, !data.isEmpty {
+                Task {
+                    do {
+                        let frames = try await processor.process(data)
+                        for frame in frames {
+                            self.onFrameReceived?(frame)
+                        }
+                        if isComplete || error != nil {
+                            conn.cancel()
+                        } else {
+                            self.receiveLoop(on: conn, processor: processor)
+                        }
+                    } catch {
+                        conn.cancel()
+                    }
+                }
+                return
+            }
+            if isComplete || error != nil {
+                conn.cancel()
+                return
+            }
+            self.receiveLoop(on: conn, processor: processor)
         }
     }
 

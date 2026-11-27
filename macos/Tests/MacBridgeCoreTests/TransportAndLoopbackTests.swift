@@ -454,4 +454,125 @@ struct TransportAndLoopbackTests {
             #expect(decodedInput == input)
         }
     }
+
+    @Test("Full-duplex Wi-Fi mTLS server and client exchange SCREEN_FRAME and FILE_OFFER/FILE_CHUNK bidirectionally")
+    func fullDuplexMtlsServerAndClientExchange() async throws {
+        let serverStore = InMemorySecureStore()
+        let clientStore = InMemorySecureStore()
+
+        let serverId = try IdentityManager(store: serverStore)
+            .loadOrCreateIdentity(deviceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        let clientId = try IdentityManager(store: clientStore)
+            .loadOrCreateIdentity(deviceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+
+        let serverTrust = TrustStore(store: serverStore)
+        try serverTrust.savePeer(TrustedPeer(
+            deviceId: clientId.deviceId,
+            deviceName: "Pixel Duplex",
+            pinnedCertSha256: clientId.certificateSha256Hex,
+            sharedBleSecret: Data(repeating: 0x33, count: 32)
+        ))
+
+        let clientTrust = TrustStore(store: clientStore)
+        try clientTrust.savePeer(TrustedPeer(
+            deviceId: serverId.deviceId,
+            deviceName: "Mac Duplex",
+            pinnedCertSha256: serverId.certificateSha256Hex,
+            sharedBleSecret: Data(repeating: 0x33, count: 32)
+        ))
+
+        actor Collector {
+            var serverRx: [WireFrame] = []
+            var clientRx: [WireFrame] = []
+            func addServer(_ f: WireFrame) { serverRx.append(f) }
+            func addClient(_ f: WireFrame) { clientRx.append(f) }
+        }
+        let collector = Collector()
+
+        let server = WifiTlsServer(
+            identity: serverId,
+            expectedPeerDeviceId: clientId.deviceId,
+            trustStore: serverTrust
+        )
+        server.onFrameReceived = { frame in
+            Task { await collector.addServer(frame) }
+        }
+        let port = try await server.start(port: 0, advertiseBonjour: false)
+        defer { server.stop() }
+        #expect(port > 0)
+
+        let client = WifiTlsClient(
+            identity: clientId,
+            expectedPeerDeviceId: serverId.deviceId,
+            trustStore: clientTrust
+        )
+        client.onFrameReceived = { frame in
+            Task { await collector.addClient(frame) }
+        }
+        try await client.connect(host: "127.0.0.1", port: port)
+        defer { client.close() }
+
+        let clientReady = await server.waitForClientConnection(timeoutSeconds: 2.0)
+        #expect(clientReady)
+        #expect(server.hasActiveClients)
+
+        // 1. Client -> Server: FILE_OFFER + FILE_CHUNK
+        let offer = FileOfferPayload(
+            transferId: "tx-duplex-1",
+            filename: "demo.bin",
+            byteSize: 2048,
+            sha256Hex: String(repeating: "a", count: 64),
+            chunkSize: 2048,
+            mimeType: "application/octet-stream"
+        )
+        let offerFrame = try WireFrame(
+            messageType: .fileOffer,
+            sequenceId: 10,
+            payload: JSONEncoder().encode(offer)
+        )
+        let chunkData = Data((0..<2048).map { UInt8($0 & 0xFF) })
+        let chunkPkt = try FileChunkPacket(transferId: "tx-duplex-1", chunkIndex: 0, data: chunkData)
+        let chunkFrame = try WireFrame(
+            messageType: .fileChunk,
+            sequenceId: 11,
+            payload: chunkPkt.encode()
+        )
+        try await client.send(frame: offerFrame)
+        try await client.send(frame: chunkFrame)
+
+        // 2. Server -> Client: SCREEN_FRAME
+        let jpeg = Data([0xFF, 0xD8, 0xFF, 0xE0]) + Data((0..<1500).map { UInt8($0 & 0xFF) }) + Data([0xFF, 0xD9])
+        let screenPkt = try ScreenFramePacket(
+            source: ScreenFrameSource.android.rawValue,
+            width: 540,
+            height: 1200,
+            timestampMs: 1_770_000_999_000,
+            jpegData: jpeg
+        )
+        let screenFrame = try WireFrame(
+            messageType: .screenFrame,
+            sequenceId: 21,
+            payload: screenPkt.encode()
+        )
+        try await server.send(frame: screenFrame)
+
+        // Wait up to 2s for async TLS reads
+        for _ in 0..<20 {
+            let sCount = await collector.serverRx.count
+            let cCount = await collector.clientRx.count
+            if sCount == 2 && cCount == 1 { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+
+        let serverRx = await collector.serverRx
+        let clientRx = await collector.clientRx
+        #expect(serverRx.count == 2)
+        #expect(serverRx[0] == offerFrame)
+        #expect(serverRx[1] == chunkFrame)
+
+        #expect(clientRx.count == 1)
+        let decodedScreen = try ScreenFramePacket.decode(from: clientRx[0].payload)
+        #expect(decodedScreen == screenPkt)
+        #expect(decodedScreen.jpegData == jpeg)
+    }
 }

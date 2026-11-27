@@ -3,6 +3,7 @@ package com.linkme.androidbridge.core.transport
 import com.linkme.androidbridge.core.crypto.IdentityManager
 import com.linkme.androidbridge.core.crypto.TrustStore
 import com.linkme.androidbridge.core.protocol.FrameDecoder
+import com.linkme.androidbridge.core.protocol.FrameEncoder
 import com.linkme.androidbridge.core.protocol.ReplayGuard
 import com.linkme.androidbridge.core.protocol.WireFrame
 import java.net.Inet4Address
@@ -11,6 +12,7 @@ import java.net.NetworkInterface
 import java.net.Socket
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
@@ -63,10 +65,39 @@ class WifiTlsServer(
     private val onFrameReceived: ((WireFrame) -> Unit)? = null
 ) {
     private val executor = Executors.newCachedThreadPool()
+    private val activeClients = CopyOnWriteArrayList<SSLSocket>()
+    private val clientMonitor = Object()
     private var serverSocket: SSLServerSocket? = null
 
     val localPort: Int
         get() = serverSocket?.localPort ?: -1
+
+    val hasActiveClients: Boolean
+        get() = activeClients.any { !it.isClosed && it.isConnected }
+
+    fun waitForClient(timeoutMs: Long = 2000L): Boolean {
+        if (hasActiveClients) return true
+        val deadline = System.currentTimeMillis() + timeoutMs
+        synchronized(clientMonitor) {
+            while (!hasActiveClients) {
+                val remaining = deadline - System.currentTimeMillis()
+                if (remaining <= 0L) break
+                runCatching { clientMonitor.wait(remaining) }
+            }
+        }
+        return hasActiveClients
+    }
+
+    fun send(frame: WireFrame) {
+        val client = activeClients.lastOrNull { !it.isClosed && it.isConnected }
+            ?: error("No connected Wi-Fi TLS client")
+        val encoded = FrameEncoder.encode(frame)
+        synchronized(client) {
+            val out = client.outputStream
+            out.write(encoded)
+            out.flush()
+        }
+    }
 
     fun start(port: Int = 0, bindAddress: InetAddress = InetAddress.getLoopbackAddress()): Int {
         val sslContext = buildPinnedMtlsSslContext(identityManager, trustStore, expectedPeerDeviceId)
@@ -87,23 +118,32 @@ class WifiTlsServer(
     private fun handleClient(socket: SSLSocket) {
         val decoder = FrameDecoder()
         val replayGuard = ReplayGuard()
-        socket.use { tls ->
-            tls.startHandshake()
-            val input = tls.inputStream
-            val buffer = ByteArray(16_384)
-            while (true) {
-                val read = input.read(buffer)
-                if (read <= 0) break
-                decoder.append(buffer.copyOf(read))
-                for (frame in decoder.drainFrames()) {
-                    replayGuard.validateAndAccept(frame.sequenceId)
-                    onFrameReceived?.invoke(frame)
+        try {
+            socket.use { tls ->
+                tls.startHandshake()
+                activeClients.add(tls)
+                synchronized(clientMonitor) { clientMonitor.notifyAll() }
+                val input = tls.inputStream
+                val buffer = ByteArray(16_384)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read <= 0) break
+                    decoder.append(buffer.copyOf(read))
+                    for (frame in decoder.drainFrames()) {
+                        replayGuard.validateAndAccept(frame.sequenceId)
+                        onFrameReceived?.invoke(frame)
+                    }
                 }
             }
+        } finally {
+            activeClients.remove(socket)
         }
     }
 
     fun stop() {
+        activeClients.forEach { runCatching { it.close() } }
+        activeClients.clear()
+        synchronized(clientMonitor) { clientMonitor.notifyAll() }
         runCatching { serverSocket?.close() }
         serverSocket = null
         executor.shutdownNow()

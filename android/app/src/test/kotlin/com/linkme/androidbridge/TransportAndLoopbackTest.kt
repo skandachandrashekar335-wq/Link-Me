@@ -536,4 +536,117 @@ class TransportAndLoopbackTest {
         assertEquals(0f, RemoteInputCoordinateMapper.toPixel(-0.5, 1080), 0.1f)
         assertEquals(2399f, RemoteInputCoordinateMapper.toPixel(1.5, 2400), 0.1f)
     }
+
+    @Test
+    fun fullDuplexMtlsServerAndClientExchange() {
+        val serverIdMgr = IdentityManager(useAndroidKeyStore = false)
+        val serverId = serverIdMgr.loadOrCreateIdentity("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+
+        val clientIdMgr = IdentityManager(useAndroidKeyStore = false)
+        val clientId = clientIdMgr.loadOrCreateIdentity("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+
+        val serverTrust = TrustStore()
+        serverTrust.savePeer(
+            TrustedPeer(
+                deviceId = clientId.deviceId,
+                deviceName = "Android Duplex",
+                pinnedCertSha256 = clientId.certificateSha256Hex,
+                sharedBleSecret = ByteArray(32) { 0x44 }
+            )
+        )
+
+        val clientTrust = TrustStore()
+        clientTrust.savePeer(
+            TrustedPeer(
+                deviceId = serverId.deviceId,
+                deviceName = "Mac Duplex",
+                pinnedCertSha256 = serverId.certificateSha256Hex,
+                sharedBleSecret = ByteArray(32) { 0x44 }
+            )
+        )
+
+        val serverLatch = CountDownLatch(2)
+        val clientLatch = CountDownLatch(1)
+        val serverRx = CopyOnWriteArrayList<WireFrame>()
+        val clientRx = CopyOnWriteArrayList<WireFrame>()
+
+        val server = WifiTlsServer(
+            identityManager = serverIdMgr,
+            trustStore = serverTrust,
+            expectedPeerDeviceId = clientId.deviceId,
+            onFrameReceived = {
+                serverRx.add(it)
+                serverLatch.countDown()
+            }
+        )
+        val port = server.start(0)
+        val client = WifiTlsClient(
+            identityManager = clientIdMgr,
+            trustStore = clientTrust,
+            expectedPeerDeviceId = serverId.deviceId,
+            onFrameReceived = {
+                clientRx.add(it)
+                clientLatch.countDown()
+            }
+        )
+
+        try {
+            client.connect("127.0.0.1", port)
+            assertTrue(server.waitForClient(2000L))
+            assertTrue(server.hasActiveClients)
+
+            // Client -> Server: FILE_OFFER + FILE_CHUNK
+            val offer = FileOfferPayload(
+                transferId = "tx-duplex-1",
+                filename = "demo.bin",
+                byteSize = 2048L,
+                sha256Hex = "a".repeat(64),
+                chunkSize = 2048,
+                mimeType = "application/octet-stream"
+            )
+            val offerFrame = WireFrame(
+                WireMessageType.FILE_OFFER,
+                10L,
+                Json.encodeToString(offer).toByteArray()
+            )
+            val chunkBytes = ByteArray(2048) { (it and 0xFF).toByte() }
+            val chunkFrame = WireFrame(
+                WireMessageType.FILE_CHUNK,
+                11L,
+                FileChunkPacket("tx-duplex-1", 0, chunkBytes).encode()
+            )
+            client.send(offerFrame)
+            client.send(chunkFrame)
+
+            // Server -> Client: SCREEN_FRAME
+            val jpeg = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte()) +
+                ByteArray(1500) { (it and 0xFF).toByte() } +
+                byteArrayOf(0xFF.toByte(), 0xD9.toByte())
+            val screenPkt = ScreenFramePacket(
+                source = ScreenFramePacket.SOURCE_ANDROID,
+                width = 540,
+                height = 1200,
+                timestampMs = 1_770_000_999_000L,
+                jpegData = jpeg
+            )
+            val screenFrame = WireFrame(WireMessageType.SCREEN_FRAME, 21L, screenPkt.encode())
+            server.send(screenFrame)
+
+            assertTrue(serverLatch.await(3, TimeUnit.SECONDS))
+            assertTrue(clientLatch.await(3, TimeUnit.SECONDS))
+
+            assertEquals(2, serverRx.size)
+            assertEquals(offerFrame.messageType, serverRx[0].messageType)
+            assertEquals(chunkFrame.messageType, serverRx[1].messageType)
+            assertArrayEquals(chunkFrame.payload, serverRx[1].payload)
+
+            assertEquals(1, clientRx.size)
+            val decodedScreen = ScreenFramePacket.decode(clientRx[0].payload)
+            assertEquals(screenPkt, decodedScreen)
+            assertArrayEquals(jpeg, decodedScreen.jpegData)
+        } finally {
+            client.close()
+            server.stop()
+        }
+    }
 }

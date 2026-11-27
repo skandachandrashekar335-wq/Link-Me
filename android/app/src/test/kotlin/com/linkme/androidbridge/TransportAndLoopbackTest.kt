@@ -46,6 +46,7 @@ import org.junit.Test
 import java.io.File
 import java.nio.file.Files
 import java.security.MessageDigest
+import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -596,12 +597,16 @@ class TransportAndLoopbackTest {
             assertTrue(server.hasActiveClients)
 
             // Client -> Server: FILE_OFFER + FILE_CHUNK
+            val txId = UUID.randomUUID()
+            val chunkBytes = ByteArray(2048) { (it and 0xFF).toByte() }
+            val chunkSha = MessageDigest.getInstance("SHA-256").digest(chunkBytes)
             val offer = FileOfferPayload(
-                transferId = "tx-duplex-1",
+                transferId = txId.toString(),
                 filename = "demo.bin",
                 byteSize = 2048L,
-                sha256Hex = "a".repeat(64),
+                sha256 = "a".repeat(64),
                 chunkSize = 2048,
+                totalChunks = 1,
                 mimeType = "application/octet-stream"
             )
             val offerFrame = WireFrame(
@@ -609,11 +614,10 @@ class TransportAndLoopbackTest {
                 10L,
                 Json.encodeToString(offer).toByteArray()
             )
-            val chunkBytes = ByteArray(2048) { (it and 0xFF).toByte() }
             val chunkFrame = WireFrame(
                 WireMessageType.FILE_CHUNK,
                 11L,
-                FileChunkPacket("tx-duplex-1", 0, chunkBytes).encode()
+                FileChunkPacket(txId, 0, chunkSha, chunkBytes).encode()
             )
             client.send(offerFrame)
             client.send(chunkFrame)

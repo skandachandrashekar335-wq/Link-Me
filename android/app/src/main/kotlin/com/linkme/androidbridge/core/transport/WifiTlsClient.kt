@@ -29,7 +29,8 @@ class WifiTlsClient(
         client.startHandshake()
         socket = client
 
-        if (onFrameReceived != null) {
+        val rxCallback = onFrameReceived
+        if (rxCallback != null) {
             val exec = Executors.newSingleThreadExecutor()
             rxExecutor = exec
             exec.submit {
@@ -44,7 +45,7 @@ class WifiTlsClient(
                         decoder.append(buffer.copyOf(read))
                         for (frame in decoder.drainFrames()) {
                             replayGuard.validateAndAccept(frame.sequenceId)
-                            onFrameReceived.invoke(frame)
+                            rxCallback.invoke(frame)
                         }
                     }
                 }

@@ -517,12 +517,15 @@ struct TransportAndLoopbackTests {
         #expect(server.hasActiveClients)
 
         // 1. Client -> Server: FILE_OFFER + FILE_CHUNK
+        let txId = UUID()
+        let chunkData = Data((0..<2048).map { UInt8($0 & 0xFF) })
         let offer = FileOfferPayload(
-            transferId: "tx-duplex-1",
+            transferId: txId.uuidString,
             filename: "demo.bin",
             byteSize: 2048,
-            sha256Hex: String(repeating: "a", count: 64),
+            sha256: String(repeating: "a", count: 64),
             chunkSize: 2048,
+            totalChunks: 1,
             mimeType: "application/octet-stream"
         )
         let offerFrame = try WireFrame(
@@ -530,8 +533,12 @@ struct TransportAndLoopbackTests {
             sequenceId: 10,
             payload: JSONEncoder().encode(offer)
         )
-        let chunkData = Data((0..<2048).map { UInt8($0 & 0xFF) })
-        let chunkPkt = try FileChunkPacket(transferId: "tx-duplex-1", chunkIndex: 0, data: chunkData)
+        let chunkPkt = try FileChunkPacket(
+            transferId: txId,
+            chunkIndex: 0,
+            chunkSha256: Data(SHA256.hash(data: chunkData)),
+            data: chunkData
+        )
         let chunkFrame = try WireFrame(
             messageType: .fileChunk,
             sequenceId: 11,

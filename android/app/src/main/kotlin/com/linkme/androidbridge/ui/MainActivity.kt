@@ -12,7 +12,12 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -20,14 +25,21 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.linkme.androidbridge.core.crypto.TrustStore
 import com.linkme.androidbridge.core.crypto.TrustedPeer
 import com.linkme.androidbridge.core.protocol.BatteryStateEvent
 import com.linkme.androidbridge.core.protocol.BatteryStateMachine
-import com.linkme.androidbridge.core.protocol.NotificationEventPayload
+import com.linkme.androidbridge.core.protocol.DeviceCommandPayload
 import com.linkme.androidbridge.service.BridgeForegroundService
+import com.linkme.androidbridge.service.NotificationAddonStatus
+import com.linkme.androidbridge.service.NotificationCompanionBridge
 import com.linkme.androidbridge.ui.theme.AndroidBridgeTheme
+import com.linkme.androidbridge.ui.theme.StitchTokens
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -37,7 +49,6 @@ import kotlinx.coroutines.withContext
  */
 class MainActivity : ComponentActivity() {
     private val sharedUris = mutableStateListOf<Uri>()
-    private val notificationFeed = mutableStateListOf<NotificationEventPayload>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,18 +58,37 @@ class MainActivity : ComponentActivity() {
         setContent {
             AndroidBridgeTheme {
                 val scope = rememberCoroutineScope()
+                val lifecycleOwner = this@MainActivity
                 val stateMachine = remember { BatteryStateMachine() }
                 var currentState by remember { mutableStateOf(stateMachine.state) }
                 var showQrPairing by remember { mutableStateOf(false) }
+                var showAddonGuideDialog by remember { mutableStateOf(false) }
                 var trustStore by remember { mutableStateOf<TrustStore?>(null) }
                 var pairedPeerName by remember { mutableStateOf("No Mac Paired") }
                 var isPaired by remember { mutableStateOf(false) }
                 var clipboardSyncEnabled by remember { mutableStateOf(true) }
                 var notificationMirrorEnabled by remember { mutableStateOf(true) }
+                var addonStatus by remember { mutableStateOf(NotificationAddonStatus.NOT_INSTALLED) }
                 var latencyMs by remember { mutableStateOf<Int?>(null) }
                 var permissionsGranted by remember { mutableStateOf(hasRequiredPermissions()) }
                 var batteryPercent by remember { mutableIntStateOf(100) }
                 var isCharging by remember { mutableStateOf(false) }
+                val liveNotifications by NotificationCompanionBridge.recentFeed.collectAsState()
+
+                DisposableEffect(lifecycleOwner) {
+                    val observer = LifecycleEventObserver { _, event ->
+                        if (event == Lifecycle.Event.ON_RESUME) {
+                            scope.launch(Dispatchers.IO) {
+                                val nextStatus = NotificationCompanionBridge.inspectAddonStatus(applicationContext)
+                                withContext(Dispatchers.Main) {
+                                    addonStatus = nextStatus
+                                }
+                            }
+                        }
+                    }
+                    lifecycleOwner.lifecycle.addObserver(observer)
+                    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+                }
 
                 val permissionLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestMultiplePermissions()
@@ -75,6 +105,10 @@ class MainActivity : ComponentActivity() {
                     val loaded = withContext(Dispatchers.IO) {
                         runCatching { TrustStore.forContext(applicationContext) }.getOrNull()
                     }
+                    val initialAddonStatus = withContext(Dispatchers.IO) {
+                        NotificationCompanionBridge.inspectAddonStatus(applicationContext)
+                    }
+                    addonStatus = initialAddonStatus
                     trustStore = loaded
                     val firstPeer = loaded?.allPeers()?.firstOrNull()
                     if (firstPeer != null) {
@@ -131,9 +165,10 @@ class MainActivity : ComponentActivity() {
                         isCharging = isCharging,
                         clipboardSyncEnabled = clipboardSyncEnabled,
                         notificationMirrorEnabled = notificationMirrorEnabled,
+                        addonStatus = addonStatus,
                         latencyMs = latencyMs,
                         queuedShareCount = sharedUris.size,
-                        notifications = notificationFeed,
+                        notifications = liveNotifications,
                         onToggleClipboardSync = { clipboardSyncEnabled = it },
                         onToggleNotificationMirror = { notificationMirrorEnabled = it },
                         onScanQrClick = { showQrPairing = true },
@@ -149,14 +184,69 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         onNotificationAccessClick = {
-                            runCatching {
-                                startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                            if (addonStatus == NotificationAddonStatus.NOT_INSTALLED) {
+                                showAddonGuideDialog = true
+                            } else {
+                                runCatching {
+                                    startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                                }
                             }
                         },
-                        onSendInlineReply = { key, _ ->
-                            notificationFeed.removeAll { it.sbnKey == key }
+                        onSendInlineReply = { key, replyText ->
+                            NotificationCompanionBridge.dispatchDeviceCommand(
+                                this,
+                                DeviceCommandPayload(
+                                    command = "replyToNotification",
+                                    sbnKey = key,
+                                    replyText = replyText,
+                                    timestampMs = System.currentTimeMillis()
+                                )
+                            )
                         }
                     )
+
+                    if (showAddonGuideDialog) {
+                        AlertDialog(
+                            onDismissRequest = { showAddonGuideDialog = false },
+                            containerColor = StitchTokens.SurfaceContainer,
+                            titleContentColor = StitchTokens.OnSurface,
+                            textContentColor = StitchTokens.SecondaryText,
+                            title = { Text("Optional Notification Add-on") },
+                            text = {
+                                Text(
+                                    "AndroidBridge keeps Notification Listener permission out of the main APK so Play Protect installs cleanly.\n\n" +
+                                        "To enable notification mirroring:\n" +
+                                        "1. Install AndroidBridge-NotifyAddon-v0.2.0.apk from GitHub Releases\n" +
+                                        "2. Or run: adb install -r AndroidBridge-NotifyAddon-v0.2.0.apk\n" +
+                                        "3. Grant Notification Access to Link-Me Notify Add-on.",
+                                    fontSize = 13.sp,
+                                    fontFamily = FontFamily.Default
+                                )
+                            },
+                            confirmButton = {
+                                TextButton(
+                                    onClick = {
+                                        showAddonGuideDialog = false
+                                        runCatching {
+                                            startActivity(
+                                                Intent(
+                                                    Intent.ACTION_VIEW,
+                                                    Uri.parse("https://github.com/skandachandrashekar335-wq/Link-Me/releases/tag/v0.2.0")
+                                                )
+                                            )
+                                        }
+                                    }
+                                ) {
+                                    Text("Open Release", color = StitchTokens.PrimaryCrimson)
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showAddonGuideDialog = false }) {
+                                    Text("Close", color = StitchTokens.SecondaryText)
+                                }
+                            }
+                        )
+                    }
                 }
             }
         }

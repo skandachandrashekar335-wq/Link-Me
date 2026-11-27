@@ -67,7 +67,7 @@ cd android
 
 ## Installing Release Binaries (`MacBridge.dmg` & `AndroidBridge.apk`)
 
-Tagged releases (`v*`) attach `MacBridge-v*.dmg`, `AndroidBridge-v*.apk`, and `SHA256SUMS.txt`.
+Tagged releases (`v*`) attach `MacBridge-v*.dmg`, `AndroidBridge-v*.apk`, `AndroidBridge-NotifyAddon-v*.apk`, and `SHA256SUMS.txt`.
 
 ### Opening an Ad-Hoc Signed `.dmg` on macOS
 Release `.dmg` builds produced in CI are **ad-hoc signed** (`codesign --sign -`) rather than Apple Developer ID notarized, so macOS Gatekeeper will warn on first launch:
@@ -79,3 +79,19 @@ Release `.dmg` builds produced in CI are **ad-hoc signed** (`codesign --sign -`)
    open /Applications/MacBridge.app
    ```
 3. Grant **Bluetooth**, **Local Network**, and **Notifications** permissions when prompted. `MacBridge` runs as a menu-bar agent (`LSUIElement = true`) with no Dock icon.
+
+### Installing `AndroidBridge` on Android (Play-Protect Clean + Optional Notification Add-on)
+
+To prevent Google Play Protect Enhanced Fraud Protection from blocking sideloads on Samsung and Android 14–16 devices, the core app does **not** declare `BIND_NOTIFICATION_LISTENER_SERVICE`:
+
+1. **Core App (`AndroidBridge-v0.2.0.apk`) — 100% Play-Protect Clean:**
+   Install directly on your phone (supports BLE discovery, QR pairing, Universal Clipboard Sync, File Beam up to 4.0 GB over mTLS 1.3, battery telemetry, and Ring My Phone), or install via ADB:
+   ```bash
+   adb install -r AndroidBridge-v0.2.0.apk
+   ```
+2. **Optional Notification Mirroring Add-on (`AndroidBridge-NotifyAddon-v0.2.0.apk`):**
+   If you want mirrored Android notifications and inline replies on macOS, install the companion add-on (signed with the same release key so IPC uses Android `signature`-level `com.linkme.androidbridge.permission.MIRROR_IPC`):
+   ```bash
+   adb install -r AndroidBridge-v0.2.0.apk && adb install -r AndroidBridge-NotifyAddon-v0.2.0.apk
+   ```
+   Then open **Settings → Notifications → Notification read, reply & control (Notification access)** and enable **Link-Me Notify Add-on**.

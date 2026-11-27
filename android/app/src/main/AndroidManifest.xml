@@ -24,6 +24,16 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- Signature-verified local IPC with optional Notification Mirroring Add-on -->
+    <permission
+        android:name="com.linkme.androidbridge.permission.MIRROR_IPC"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="com.linkme.androidbridge.permission.MIRROR_IPC" />
+
+    <queries>
+        <package android:name="com.linkme.androidbridge.notifyaddon" />
+    </queries>
+
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
@@ -67,14 +77,15 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
-        <service
-            android:name=".service.BridgeNotificationListener"
+        <!-- Signature-verified IPC receiver for optional AndroidBridge-NotifyAddon APK -->
+        <receiver
+            android:name=".service.NotificationCompanionReceiver"
             android:exported="true"
-            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            android:permission="com.linkme.androidbridge.permission.MIRROR_IPC">
             <intent-filter>
-                <action android:name="android.service.notification.NotificationListenerService" />
+                <action android:name="com.linkme.androidbridge.ACTION_NOTIFICATION_EVENT_IPC" />
             </intent-filter>
-        </service>
+        </receiver>
 
         <service
             android:name=".service.ClipboardTileService"

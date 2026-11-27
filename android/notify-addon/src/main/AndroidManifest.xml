@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="com.linkme.androidbridge.permission.MIRROR_IPC" />
+
+    <queries>
+        <package android:name="com.linkme.androidbridge" />
+    </queries>
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="Link-Me Notify Add-on"
+        android:supportsRtl="true">
+
+        <service
+            android:name=".AddonNotificationListenerService"
+            android:exported="true"
+            android:label="Link-Me Notification Mirror"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <receiver
+            android:name=".AddonCommandReceiver"
+            android:exported="true"
+            android:permission="com.linkme.androidbridge.permission.MIRROR_IPC">
+            <intent-filter>
+                <action android:name="com.linkme.androidbridge.ACTION_DEVICE_COMMAND_IPC" />
+            </intent-filter>
+        </receiver>
+    </application>
+
+</manifest>

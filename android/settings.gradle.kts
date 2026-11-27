@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "AndroidBridge"
-include(":app")
+include(":app", ":notify-addon")

@@ -78,6 +78,7 @@ class BridgeNotificationListener : NotificationListenerService() {
             timestampMs = sbn.postTime,
             replyExecutor = executor
         ) ?: return
+        NotificationCompanionBridge.dispatchIncomingEvent(event)
         onNotificationEvent?.invoke(event)
     }
 
@@ -85,6 +86,7 @@ class BridgeNotificationListener : NotificationListenerService() {
         val key = sbn?.key ?: return
         val pkg = sbn.packageName
         val event = router.onRemoved(sbnKey = key, packageName = pkg) ?: return
+        NotificationCompanionBridge.dispatchIncomingEvent(event)
         onNotificationEvent?.invoke(event)
     }
 

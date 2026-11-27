@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.linkme.androidbridge.core.protocol.BridgeState
 import com.linkme.androidbridge.core.protocol.NotificationEventPayload
+import com.linkme.androidbridge.service.NotificationAddonStatus
 import com.linkme.androidbridge.ui.theme.StitchTokens
 
 @Composable
@@ -60,6 +61,7 @@ fun BridgeHomeScreen(
     isCharging: Boolean,
     clipboardSyncEnabled: Boolean,
     notificationMirrorEnabled: Boolean,
+    addonStatus: NotificationAddonStatus,
     latencyMs: Int?,
     queuedShareCount: Int,
     notifications: List<NotificationEventPayload>,
@@ -89,14 +91,16 @@ fun BridgeHomeScreen(
                     val latLabel = latencyMs?.let { "${it}MS" } ?: "-- MS"
                     Text(
                         text = "LATENCY: $latLabel",
-                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 10.sp,
+                        letterSpacing = 0.6.sp,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.SemiBold,
                         color = StitchTokens.TertiaryMint
                     )
                     Text(
                         text = "E2EE: TLS 1.3 PINNED",
-                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 10.sp,
+                        letterSpacing = 0.6.sp,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.SemiBold,
                         color = StitchTokens.SecondaryText
@@ -113,85 +117,101 @@ fun BridgeHomeScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // 1. Header: 40x40 Circular Battery Ring (#74D8BD) + Bolt + Device + Status Pill
-            Row(
+            // 1. Header (#1B1C1E): 40x40 Circular Battery Ring (#74D8BD) + Bolt + Device + Status Pill (#292A2C + #E11D48 dot)
+            Card(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                shape = RoundedCornerShape(10.dp),
+                colors = CardDefaults.cardColors(containerColor = StitchTokens.SurfaceLow),
+                border = BorderStroke(1.dp, StitchTokens.OutlineVariant)
             ) {
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(
-                        modifier = Modifier.size(40.dp),
-                        contentAlignment = Alignment.Center
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.weight(1f)
                     ) {
-                        Canvas(modifier = Modifier.size(40.dp)) {
-                            val strokePx = 3.5.dp.toPx()
-                            drawArc(
-                                color = StitchTokens.SurfaceHigh,
-                                startAngle = 0f,
-                                sweepAngle = 360f,
-                                useCenter = false,
-                                style = Stroke(width = strokePx)
-                            )
-                            drawArc(
-                                color = StitchTokens.TertiaryMint,
-                                startAngle = -90f,
-                                sweepAngle = 360f * (batteryPercent.coerceIn(0, 100) / 100f),
-                                useCenter = false,
-                                style = Stroke(width = strokePx, cap = StrokeCap.Round)
+                        Box(
+                            modifier = Modifier.size(40.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Canvas(modifier = Modifier.size(40.dp)) {
+                                val strokePx = 3.5.dp.toPx()
+                                drawArc(
+                                    color = StitchTokens.SurfaceHigh,
+                                    startAngle = 0f,
+                                    sweepAngle = 360f,
+                                    useCenter = false,
+                                    style = Stroke(width = strokePx)
+                                )
+                                drawArc(
+                                    color = StitchTokens.TertiaryMint,
+                                    startAngle = -90f,
+                                    sweepAngle = 360f * (batteryPercent.coerceIn(0, 100) / 100f),
+                                    useCenter = false,
+                                    style = Stroke(width = strokePx, cap = StrokeCap.Round)
+                                )
+                            }
+                            Text(
+                                text = if (isCharging) "⚡" else "$batteryPercent",
+                                fontSize = if (isCharging) 14.sp else 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                color = StitchTokens.TertiaryMint
                             )
                         }
+
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                text = peerName,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = StitchTokens.OnSurface
+                            )
+                            val chargeLabel = if (isCharging) "CHARGING" else "BATTERY"
+                            val pairLabel = if (isPaired) "PAIRED" else "UNPAIRED"
+                            Text(
+                                text = "$batteryPercent% $chargeLabel • $pairLabel",
+                                fontSize = 10.sp,
+                                letterSpacing = 0.6.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = StitchTokens.SecondaryText
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(StitchTokens.SurfaceHigh)
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(if (isTurbo) StitchTokens.TertiaryMint else StitchTokens.PrimaryCrimson)
+                        )
                         Text(
-                            text = if (isCharging) "⚡" else "$batteryPercent",
-                            fontSize = if (isCharging) 14.sp else 10.sp,
+                            text = if (isTurbo) "WI-FI TURBO 5GHZ" else "BLE STANDBY",
+                            fontSize = 10.sp,
+                            letterSpacing = 0.6.sp,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
-                            color = StitchTokens.TertiaryMint
+                            color = if (isTurbo) StitchTokens.TertiaryMint else StitchTokens.OnSurface
                         )
                     }
-
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(
-                            text = peerName,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = StitchTokens.OnSurface
-                        )
-                        val chargeLabel = if (isCharging) "CHARGING" else "BATTERY"
-                        val pairLabel = if (isPaired) "PAIRED" else "UNPAIRED"
-                        Text(
-                            text = "$batteryPercent% $chargeLabel • $pairLabel",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = StitchTokens.SecondaryText
-                        )
-                    }
-                }
-
-                Box(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(
-                            if (isTurbo) StitchTokens.TertiaryMint.copy(alpha = 0.16f)
-                            else StitchTokens.SurfaceHigh
-                        )
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = if (isTurbo) "WI-FI TURBO 5GHZ" else "BLE STANDBY",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                        color = if (isTurbo) StitchTokens.TertiaryMint else StitchTokens.OnSurface
-                    )
                 }
             }
 
-            // 2. Beam Files Card (#0D0E10 dashed/hairline)
+            // 2. Beam Files Card (#0D0E10 dashed/hairline + #292A2C icon container)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -215,10 +235,24 @@ fun BridgeHomeScreen(
                         .fillMaxWidth()
                         .padding(vertical = 18.dp, horizontal = 16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(StitchTokens.SurfaceHigh),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "↑",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = StitchTokens.TertiaryMint
+                        )
+                    }
                     Text(
-                        text = "↑ BEAM FILES TO MAC",
+                        text = "Beam files to Mac",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold,
                         color = StitchTokens.OnSurface
@@ -229,7 +263,8 @@ fun BridgeHomeScreen(
                         } else {
                             "MAX 4.0 GB • DIRECT P2P"
                         },
-                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 10.sp,
+                        letterSpacing = 0.6.sp,
                         fontFamily = FontFamily.Monospace,
                         color = StitchTokens.SecondaryText
                     )
@@ -243,12 +278,78 @@ fun BridgeHomeScreen(
                 checked = clipboardSyncEnabled,
                 onCheckedChange = onToggleClipboardSync
             )
+            val mirrorSubtitle = when (addonStatus) {
+                NotificationAddonStatus.ACTIVE -> "Interactive replies"
+                NotificationAddonStatus.INSTALLED_NEEDS_PERMISSION -> "Notification access required"
+                NotificationAddonStatus.NOT_INSTALLED -> "Optional add-on required"
+            }
             StitchSwitchCard(
                 title = "Notification Mirroring",
-                subtitle = "Interactive replies",
-                checked = notificationMirrorEnabled,
-                onCheckedChange = onToggleNotificationMirror
+                subtitle = mirrorSubtitle,
+                checked = notificationMirrorEnabled && addonStatus == NotificationAddonStatus.ACTIVE,
+                onCheckedChange = { wantEnabled ->
+                    if (wantEnabled && addonStatus != NotificationAddonStatus.ACTIVE) {
+                        onNotificationAccessClick()
+                    } else {
+                        onToggleNotificationMirror(wantEnabled)
+                    }
+                }
             )
+
+            // Graceful Modular Add-on Card when Notification Listener Add-on is not yet active
+            if (addonStatus != NotificationAddonStatus.ACTIVE) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = CardDefaults.cardColors(containerColor = StitchTokens.SurfaceLow),
+                    border = BorderStroke(1.dp, StitchTokens.OutlineVariant)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(end = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Text(
+                                text = "Enable Optional Notification Add-on",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = StitchTokens.OnSurface
+                            )
+                            Text(
+                                text = if (addonStatus == NotificationAddonStatus.INSTALLED_NEEDS_PERMISSION) {
+                                    "Notify Add-on installed — grant Notification Access in Settings."
+                                } else {
+                                    "Core APK is Play-Protect clean. Install AndroidBridge-NotifyAddon APK for notifications."
+                                },
+                                fontSize = 11.sp,
+                                color = StitchTokens.SecondaryText
+                            )
+                        }
+                        Button(
+                            onClick = onNotificationAccessClick,
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = StitchTokens.PrimaryCrimson,
+                                contentColor = Color.White
+                            )
+                        ) {
+                            Text(
+                                text = if (addonStatus == NotificationAddonStatus.INSTALLED_NEEDS_PERMISSION) "Grant" else "Get Add-on",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            }
 
             // Quick Actions Row
             Row(
@@ -280,14 +381,19 @@ fun BridgeHomeScreen(
                     shape = RoundedCornerShape(8.dp),
                     border = BorderStroke(1.dp, StitchTokens.OutlineVariant)
                 ) {
-                    Text("Notifs", fontSize = 12.sp, color = StitchTokens.OnSurface)
+                    Text(
+                        text = if (addonStatus == NotificationAddonStatus.ACTIVE) "Notifs ✓" else "Add-on",
+                        fontSize = 12.sp,
+                        color = if (addonStatus == NotificationAddonStatus.ACTIVE) StitchTokens.TertiaryMint else StitchTokens.OnSurface
+                    )
                 }
             }
 
             // 4. Recent Notifications Feed (#E4E2DE replyable vs #1F2022 non-replyable)
             Text(
                 text = "RECENT NOTIFICATIONS",
-                style = MaterialTheme.typography.labelSmall,
+                fontSize = 10.sp,
+                letterSpacing = 0.6.sp,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
                 color = StitchTokens.SecondaryText
@@ -301,7 +407,11 @@ fun BridgeHomeScreen(
                     border = BorderStroke(1.dp, StitchTokens.OutlineVariant)
                 ) {
                     Text(
-                        text = "No mirrored notifications yet",
+                        text = if (addonStatus == NotificationAddonStatus.ACTIVE) {
+                            "No mirrored notifications yet"
+                        } else {
+                            "Waiting for optional Notification Add-on"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
                         color = StitchTokens.SecondaryText,
@@ -322,21 +432,38 @@ fun BridgeHomeScreen(
                             colors = CardDefaults.cardColors(containerColor = StitchTokens.SurfaceContainer),
                             border = BorderStroke(1.dp, StitchTokens.OutlineVariant)
                         ) {
-                            Column(
+                            Row(
                                 modifier = Modifier.padding(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(3.dp)
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalAlignment = Alignment.Top
                             ) {
-                                Text(
-                                    text = "${item.appName.uppercase()} • ${item.title}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontFamily = FontFamily.Monospace,
-                                    color = StitchTokens.SecondaryText
-                                )
-                                Text(
-                                    text = item.body,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = StitchTokens.OnSurface
-                                )
+                                Box(
+                                    modifier = Modifier
+                                        .size(22.dp)
+                                        .clip(CircleShape)
+                                        .background(StitchTokens.TertiaryMint.copy(alpha = 0.15f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "•",
+                                        fontSize = 14.sp,
+                                        color = StitchTokens.TertiaryMint
+                                    )
+                                }
+                                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    Text(
+                                        text = "${item.appName.uppercase()} • ${item.title}",
+                                        fontSize = 10.sp,
+                                        letterSpacing = 0.6.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = StitchTokens.SecondaryText
+                                    )
+                                    Text(
+                                        text = item.body,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = StitchTokens.OnSurface
+                                    )
+                                }
                             }
                         }
                     }

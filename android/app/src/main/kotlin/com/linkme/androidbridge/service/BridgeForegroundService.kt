@@ -113,6 +113,7 @@ class BridgeForegroundService : Service() {
         powerSaveReceiver = null
         batteryReceiver = null
         BridgeNotificationListener.onNotificationEvent = null
+        NotificationCompanionBridge.onNotificationEvent = null
         onManualClipboardSyncRequested = null
 
         runCatching { stopWifiTransport() }
@@ -219,7 +220,7 @@ class BridgeForegroundService : Service() {
             batteryReceiver = battReceiver
             registerReceiver(battReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
 
-            BridgeNotificationListener.onNotificationEvent = { event ->
+            val forwardNotificationEvent: (com.linkme.androidbridge.core.protocol.NotificationEventPayload) -> Unit = { event ->
                 serviceScope.launch {
                     runCatching {
                         val bytes = json.encodeToString(event).toByteArray(Charsets.UTF_8)
@@ -232,6 +233,8 @@ class BridgeForegroundService : Service() {
                     }
                 }
             }
+            BridgeNotificationListener.onNotificationEvent = forwardNotificationEvent
+            NotificationCompanionBridge.onNotificationEvent = forwardNotificationEvent
 
             onManualClipboardSyncRequested = {
                 serviceScope.launch {
@@ -325,7 +328,7 @@ class BridgeForegroundService : Service() {
                 runCatching { json.decodeFromString<DeviceCommandPayload>(frame.payload.decodeToString()) }
                     .onSuccess { command ->
                         telemetry?.handleDeviceCommand(this, command)
-                        BridgeNotificationListener.activeInstance?.handleDeviceCommand(command)
+                        NotificationCompanionBridge.dispatchDeviceCommand(this, command)
                     }
             }
 

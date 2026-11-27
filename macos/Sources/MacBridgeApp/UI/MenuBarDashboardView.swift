@@ -76,40 +76,54 @@ struct MenuBarDashboardView: View {
                 let pairTag = viewModel.peerPaired ? "PAIRED" : "UNPAIRED"
                 Text("\(viewModel.peerBatteryPercent)% \(chargeTag) • \(pairTag)")
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(0.6)
                     .foregroundStyle(StitchTokens.secondaryText)
             }
 
             Spacer()
 
             let isTurbo = viewModel.bridgeState == .activeWifiStream
-            Text(isTurbo ? "WI-FI TURBO 5GHZ" : "BLE STANDBY")
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(
-                    Capsule().fill(isTurbo ? StitchTokens.tertiaryMint.opacity(0.18) : StitchTokens.surfaceHigh)
-                )
-                .overlay(
-                    Capsule().stroke(isTurbo ? StitchTokens.tertiaryMint : StitchTokens.outlineVariant, lineWidth: 1)
-                )
-                .foregroundStyle(isTurbo ? StitchTokens.tertiaryMint : StitchTokens.onSurface)
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(isTurbo ? StitchTokens.tertiaryMint : StitchTokens.primaryCrimson)
+                    .frame(width: 6, height: 6)
+                Text(isTurbo ? "WI-FI TURBO 5GHZ" : "BLE STANDBY")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .tracking(0.6)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(StitchTokens.surfaceHigh))
+            .overlay(
+                Capsule().stroke(isTurbo ? StitchTokens.tertiaryMint : StitchTokens.outlineVariant, lineWidth: 1)
+            )
+            .foregroundStyle(isTurbo ? StitchTokens.tertiaryMint : StitchTokens.onSurface)
         }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(StitchTokens.surfaceLow)
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(StitchTokens.outlineVariant, lineWidth: 1))
+        )
     }
 
-    // 2. Dropzone / Beam Card (#0D0E10, dashed #5C3F40)
+    // 2. Dropzone / Beam Card (#0D0E10, #292A2C upload container, dashed #5C3F40)
     private var beamDropzoneCard: some View {
         Button {
             viewModel.openFilePickerAndSend()
         } label: {
             VStack(spacing: 6) {
                 Image(systemName: "arrow.up.doc.on.clipboard")
-                    .font(.system(size: 18, weight: .medium))
+                    .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(viewModel.isDropTargeted ? StitchTokens.primaryCrimson : StitchTokens.tertiaryMint)
+                    .frame(width: 34, height: 34)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(StitchTokens.surfaceHigh))
                 Text("Drop files to beam to Android")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(StitchTokens.onSurface)
                 Text("MAX 4.0 GB • DIRECT P2P")
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .tracking(0.6)
                     .foregroundStyle(StitchTokens.secondaryText)
             }
             .frame(maxWidth: .infinity)
@@ -278,15 +292,22 @@ struct MenuBarDashboardView: View {
                             viewModel.sendNotificationReply(sbnKey: item.id, replyText: replyText)
                         }
                     } else {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("\(item.appName.uppercased()) • \(item.title)")
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                .foregroundStyle(StitchTokens.secondaryText)
-                                .lineLimit(1)
-                            Text(item.body)
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "bell.fill")
                                 .font(.system(size: 12))
-                                .foregroundStyle(StitchTokens.onSurface)
-                                .lineLimit(2)
+                                .foregroundStyle(StitchTokens.tertiaryMint)
+                                .padding(.top, 2)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("\(item.appName.uppercased()) • \(item.title)")
+                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                    .tracking(0.6)
+                                    .foregroundStyle(StitchTokens.secondaryText)
+                                    .lineLimit(1)
+                                Text(item.body)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(StitchTokens.onSurface)
+                                    .lineLimit(2)
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(10)
@@ -307,12 +328,14 @@ struct MenuBarDashboardView: View {
             let latText = viewModel.latencyMs.map { "\($0)MS" } ?? "-- MS"
             Text("LATENCY: \(latText)")
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .tracking(0.6)
                 .foregroundStyle(StitchTokens.tertiaryMint)
 
             Spacer()
 
             Text("E2EE: TLS 1.3 PINNED")
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .tracking(0.6)
                 .foregroundStyle(StitchTokens.secondaryText)
 
             Button {

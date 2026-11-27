@@ -24,6 +24,7 @@ import com.linkme.androidbridge.service.ClipboardSyncManager
 import com.linkme.androidbridge.service.ClipboardSystemAdapter
 import com.linkme.androidbridge.service.FileTransferException
 import com.linkme.androidbridge.service.FileTransferManager
+import com.linkme.androidbridge.service.NotificationCompanionBridge
 import com.linkme.androidbridge.service.NotificationMirrorRouter
 import com.linkme.androidbridge.service.ReplyActionExecutor
 import kotlinx.serialization.json.Json
@@ -416,5 +417,35 @@ class ProtocolAndSecurityTest {
         )
         assertTrue(router.handleDeviceCommand(command))
         assertEquals(listOf("Yes, on my way!"), repliesReceived)
+    }
+
+    @Test
+    fun notificationCompanionBridgeIpcRoundTripAndBounds() {
+        val event = NotificationEventPayload(
+            action = "POST",
+            sbnKey = "0|com.signal|2|null|1000",
+            appName = "Signal",
+            packageName = "org.thoughtcrime.securesms",
+            title = "Sam",
+            body = "Encrypted hello",
+            timestampMs = 1_764_234_950_000L,
+            canReply = true
+        )
+        val rawEvent = NotificationCompanionBridge.encodeNotificationEventJson(event)
+        val decodedEvent = NotificationCompanionBridge.decodeNotificationEventJson(rawEvent)
+        assertEquals(event, decodedEvent)
+
+        val cmd = DeviceCommandPayload(
+            command = "replyToNotification",
+            sbnKey = event.sbnKey,
+            replyText = "Received",
+            timestampMs = 1_764_234_951_000L
+        )
+        val rawCmd = NotificationCompanionBridge.encodeDeviceCommandJson(cmd)
+        val decodedCmd = NotificationCompanionBridge.decodeDeviceCommandJson(rawCmd)
+        assertEquals(cmd, decodedCmd)
+
+        assertEquals(null, NotificationCompanionBridge.decodeNotificationEventJson("invalid"))
+        assertEquals(null, NotificationCompanionBridge.decodeDeviceCommandJson("x".repeat(300 * 1024)))
     }
 }

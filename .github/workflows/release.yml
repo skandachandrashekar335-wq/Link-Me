@@ -77,23 +77,20 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Assemble Release APK
+      - name: Assemble Release APKs (Core + Optional Notify Add-on)
         working-directory: android
-        run: ./gradlew assembleRelease --no-daemon
+        run: ./gradlew :app:assembleRelease :notify-addon:assembleRelease --no-daemon
 
-      - name: Align & Sign Release APK (v1/v2/v3)
+      - name: Align & Sign Release APKs (v1/v2/v3 with shared release key)
         run: |
           TAG_NAME="${{ github.event.inputs.tag || github.ref_name }}"
           mkdir -p release-out
-          RAW_APK="$(find android/app/build/outputs/apk/release -name '*.apk' | head -n 1)"
-          ALIGNED_APK="/tmp/aligned-release.apk"
-          OUT_APK="release-out/AndroidBridge-${TAG_NAME}.apk"
+          RAW_CORE_APK="$(find android/app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          RAW_ADDON_APK="$(find android/notify-addon/build/outputs/apk/release -name '*.apk' | head -n 1)"
 
           BUILD_TOOLS_DIR="$(find "${ANDROID_HOME}/build-tools" -maxdepth 1 -mindepth 1 | sort -V | tail -n 1)"
           ZIPALIGN="${BUILD_TOOLS_DIR}/zipalign"
           APKSIGNER="${BUILD_TOOLS_DIR}/apksigner"
-
-          "$ZIPALIGN" -p -f -v 4 "$RAW_APK" "$ALIGNED_APK"
 
           rm -f /tmp/release.keystore
           keytool -genkeypair -v -keystore /tmp/release.keystore \
@@ -101,21 +98,33 @@ jobs:
             -alias linkme -keyalg RSA -keysize 2048 -validity 3650 \
             -dname "CN=Link-Me,O=Link-Me,C=US"
 
-          "$APKSIGNER" sign \
-            --ks /tmp/release.keystore \
-            --ks-pass pass:linkme123 \
-            --key-pass pass:linkme123 \
-            --v1-signing-enabled true \
-            --v2-signing-enabled true \
-            --v3-signing-enabled true \
-            --out "$OUT_APK" \
-            "$ALIGNED_APK"
+          sign_apk() {
+            local raw_apk="$1"
+            local out_name="$2"
+            local aligned="/tmp/aligned-${out_name}"
+            local out_path="release-out/${out_name}"
 
-          "$APKSIGNER" verify --verbose --print-certs "$OUT_APK"
-          "$ZIPALIGN" -c -v 4 "$OUT_APK" | tail -n 5
-          test -s "$OUT_APK"
-          (cd release-out && sha256sum "AndroidBridge-${TAG_NAME}.apk" > SHA256SUMS.android.txt)
-          ls -lh "$OUT_APK"
+            "$ZIPALIGN" -p -f -v 4 "$raw_apk" "$aligned"
+            "$APKSIGNER" sign \
+              --ks /tmp/release.keystore \
+              --ks-pass pass:linkme123 \
+              --key-pass pass:linkme123 \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              --out "$out_path" \
+              "$aligned"
+
+            "$APKSIGNER" verify --verbose --print-certs "$out_path"
+            "$ZIPALIGN" -c -v 4 "$out_path" | tail -n 5
+            test -s "$out_path"
+          }
+
+          sign_apk "$RAW_CORE_APK" "AndroidBridge-${TAG_NAME}.apk"
+          sign_apk "$RAW_ADDON_APK" "AndroidBridge-NotifyAddon-${TAG_NAME}.apk"
+
+          (cd release-out && sha256sum "AndroidBridge-${TAG_NAME}.apk" "AndroidBridge-NotifyAddon-${TAG_NAME}.apk" > SHA256SUMS.android.txt)
+          ls -lh release-out/
 
       - uses: actions/upload-artifact@v4
         with:

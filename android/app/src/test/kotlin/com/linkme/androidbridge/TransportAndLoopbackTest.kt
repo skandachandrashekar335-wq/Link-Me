@@ -247,7 +247,7 @@ class TransportAndLoopbackTest {
                 bluetoothSessionKey = androidSecrets.sessionKey
             )
         )
-        val stored = trustStore.peer(macIdentity.deviceId)
+        val stored = trustStore.getPeer(macIdentity.deviceId)
         assertNotNull(stored)
         assertArrayEquals(macSecrets.sessionKey, stored!!.bluetoothSessionKey)
     }

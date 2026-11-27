@@ -21,7 +21,7 @@ jobs:
 
   macos-build-and-test:
     name: macOS (MacBridge Swift 6)
-    runs-on: macos-14
+    runs-on: macos-15
     defaults:
       run:
         working-directory: macos

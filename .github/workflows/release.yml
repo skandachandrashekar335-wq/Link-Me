@@ -98,6 +98,8 @@ jobs:
           else
             cp "$RAW_APK" "$OUT_APK"
           fi
+          APKSIGNER_BIN="${APKSIGNER:-$(find "${ANDROID_HOME}/build-tools" -name apksigner | sort -V | tail -n 1)}"
+          "$APKSIGNER_BIN" verify "$OUT_APK"
           test -s "$OUT_APK"
           (cd release-out && sha256sum "AndroidBridge-${TAG_NAME}.apk" > SHA256SUMS.android.txt)
           ls -lh "$OUT_APK"

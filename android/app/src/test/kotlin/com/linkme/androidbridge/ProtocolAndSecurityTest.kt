@@ -15,6 +15,7 @@ import com.linkme.androidbridge.core.protocol.FileOfferPayload
 import com.linkme.androidbridge.core.protocol.FilenameSanitizer
 import com.linkme.androidbridge.core.protocol.FrameDecoder
 import com.linkme.androidbridge.core.protocol.FrameEncoder
+import com.linkme.androidbridge.core.protocol.NotificationEventPayload
 import com.linkme.androidbridge.core.protocol.ProtocolError
 import com.linkme.androidbridge.core.protocol.ReplayGuard
 import com.linkme.androidbridge.core.protocol.UnsafeFilenameException

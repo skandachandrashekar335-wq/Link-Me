@@ -6,24 +6,25 @@ import Foundation
 public struct BlePrivacyBeacon: Sendable {
     public static let rotationWindowSeconds: TimeInterval = 900 // 15 minutes
 
-    private let sharedBleSecret: SymmetricKey
+    private let secretData: Data
 
     public init(sharedBleSecret: Data) {
         precondition(sharedBleSecret.count == 32, "sharedBleSecret must be 32 bytes")
-        self.sharedBleSecret = SymmetricKey(data: sharedBleSecret)
+        self.secretData = sharedBleSecret
     }
 
     public func token(at date: Date = Date()) -> Data {
         let bucket = Self.bucket(for: date)
-        return Self.computeToken(key: sharedBleSecret, bucket: bucket)
+        return Self.computeToken(key: SymmetricKey(data: secretData), bucket: bucket)
     }
 
     public func verify(token: Data, at date: Date = Date()) -> Bool {
         guard token.count == 8 else { return false }
+        let key = SymmetricKey(data: secretData)
         let current = Self.bucket(for: date)
         let buckets: [UInt64] = current > 0 ? [current, current - 1, current + 1] : [current, current + 1]
         for bucket in buckets {
-            let expected = Self.computeToken(key: sharedBleSecret, bucket: bucket)
+            let expected = Self.computeToken(key: key, bucket: bucket)
             if ConstantTime.equals(token, expected) {
                 return true
             }

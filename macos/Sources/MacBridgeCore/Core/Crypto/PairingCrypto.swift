@@ -1,4 +1,4 @@
-import CryptoKit
+@preconcurrency import CryptoKit
 import Foundation
 import Security
 
@@ -64,7 +64,7 @@ public struct PairingDerivedSecrets: Sendable, Equatable {
 
 /// Out-of-band Curve25519 QR pairing with 5-minute TTL, HKDF-SHA256 ("AndroMac-Pairing-v1"),
 /// 6-digit SAS code, and 32-byte sharedBleSecret.
-public struct PairingCrypto: Sendable {
+public struct PairingCrypto: @unchecked Sendable {
     public static let sessionTtlSeconds: TimeInterval = 300 // 5 minutes
     private static let hkdfInfo = Data("AndroMac-Pairing-v1".utf8)
 

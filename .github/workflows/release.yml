@@ -80,26 +80,38 @@ jobs:
         working-directory: android
         run: ./gradlew assembleRelease --no-daemon
 
-      - name: Sign & Package Release APK
+      - name: Align & Sign Release APK (v1/v2/v3)
         run: |
           TAG_NAME="${{ github.event.inputs.tag || github.ref_name }}"
           mkdir -p release-out
           RAW_APK="$(find android/app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          ALIGNED_APK="/tmp/aligned-release.apk"
           OUT_APK="release-out/AndroidBridge-${TAG_NAME}.apk"
-          if [[ "$RAW_APK" == *"-unsigned.apk" ]]; then
-            APKSIGNER="$(find "${ANDROID_HOME}/build-tools" -name apksigner | sort -V | tail -n 1)"
-            keytool -genkeypair -v -keystore /tmp/ci-release.jks \
-              -storepass linkme-ci-pass -keypass linkme-ci-pass \
-              -alias linkme -keyalg RSA -keysize 2048 -validity 3650 \
-              -dname "CN=Link-Me CI,O=Link-Me,C=US"
-            "$APKSIGNER" sign --ks /tmp/ci-release.jks \
-              --ks-pass pass:linkme-ci-pass --key-pass pass:linkme-ci-pass \
-              --out "$OUT_APK" "$RAW_APK"
-          else
-            cp "$RAW_APK" "$OUT_APK"
-          fi
-          APKSIGNER_BIN="${APKSIGNER:-$(find "${ANDROID_HOME}/build-tools" -name apksigner | sort -V | tail -n 1)}"
-          "$APKSIGNER_BIN" verify "$OUT_APK"
+
+          BUILD_TOOLS_DIR="$(find "${ANDROID_HOME}/build-tools" -maxdepth 1 -mindepth 1 | sort -V | tail -n 1)"
+          ZIPALIGN="${BUILD_TOOLS_DIR}/zipalign"
+          APKSIGNER="${BUILD_TOOLS_DIR}/apksigner"
+
+          "$ZIPALIGN" -p -f -v 4 "$RAW_APK" "$ALIGNED_APK"
+
+          rm -f /tmp/release.keystore
+          keytool -genkeypair -v -keystore /tmp/release.keystore \
+            -storepass linkme123 -keypass linkme123 \
+            -alias linkme -keyalg RSA -keysize 2048 -validity 3650 \
+            -dname "CN=Link-Me,O=Link-Me,C=US"
+
+          "$APKSIGNER" sign \
+            --ks /tmp/release.keystore \
+            --ks-pass pass:linkme123 \
+            --key-pass pass:linkme123 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out "$OUT_APK" \
+            "$ALIGNED_APK"
+
+          "$APKSIGNER" verify --verbose --print-certs "$OUT_APK"
+          "$ZIPALIGN" -c -v 4 "$OUT_APK" | tail -n 5
           test -s "$OUT_APK"
           (cd release-out && sha256sum "AndroidBridge-${TAG_NAME}.apk" > SHA256SUMS.android.txt)
           ls -lh "$OUT_APK"

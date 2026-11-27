@@ -16,7 +16,12 @@ import com.linkme.androidbridge.core.protocol.FrameEncoder
 import com.linkme.androidbridge.core.protocol.MediaControlAction
 import com.linkme.androidbridge.core.protocol.MediaControlPayload
 import com.linkme.androidbridge.core.protocol.OpenUrlPayload
+import com.linkme.androidbridge.core.protocol.PairAckPayload
+import com.linkme.androidbridge.core.protocol.PairCommitPayload
 import com.linkme.androidbridge.core.protocol.PairHelloPayload
+import com.linkme.androidbridge.core.protocol.PairingCommitMac
+import com.linkme.androidbridge.core.protocol.ScreenControlPayload
+import com.linkme.androidbridge.core.protocol.ScreenFramePacket
 import com.linkme.androidbridge.core.protocol.WireFrame
 import com.linkme.androidbridge.core.protocol.WireMessageType
 import com.linkme.androidbridge.core.transport.BleFrameChunker
@@ -409,5 +414,99 @@ class TransportAndLoopbackTest {
         assertEquals(1, bleFallbackFrames.size)
         assertEquals(listOf(TransportChannel.BLE_STANDBY), channels.toList())
         resilientManager.shutdown()
+    }
+
+    @Test
+    fun bidirectionalPairCommitAckAndScreenMirrorRoundTrip() {
+        val macSession = PairingCrypto()
+        val macIdentity = IdentityManager().loadOrCreateIdentity("11111111-1111-4111-8111-111111111111")
+        val androidIdentity = IdentityManager().loadOrCreateIdentity("22222222-2222-4222-8222-222222222222")
+
+        val uri = macSession.makePairingUri(
+            deviceId = macIdentity.deviceId,
+            certSha256Hex = macIdentity.certificateSha256Hex,
+            tcpPort = 49152,
+            deviceName = "Skanda MacBook Pro"
+        )
+        val parsed = PairingUriPayload.parse(uri.uriString)
+        val nonce = parsed.nonceHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+
+        val androidSession = PairingCrypto()
+        val androidDerived = androidSession.deriveSecrets(parsed.publicKeyBase64Url, nonce)
+        val macDerived = macSession.deriveSecrets(androidSession.publicKeyBase64Url, macSession.nonce)
+
+        val commitMac = PairingCommitMac.computeHex(
+            sharedBleSecret = androidDerived.sharedBleSecret,
+            deviceId = androidIdentity.deviceId,
+            spkiSha256 = androidIdentity.certificateSha256Hex,
+            ephemeralPublicKey = androidSession.publicKeyBase64Url
+        )
+        val expectedMacOnMacSide = PairingCommitMac.computeHex(
+            sharedBleSecret = macDerived.sharedBleSecret,
+            deviceId = androidIdentity.deviceId,
+            spkiSha256 = androidIdentity.certificateSha256Hex,
+            ephemeralPublicKey = androidSession.publicKeyBase64Url
+        )
+        assertEquals(commitMac, expectedMacOnMacSide)
+
+        val commit = PairCommitPayload(
+            deviceId = androidIdentity.deviceId,
+            deviceName = "Samsung SM-A736B",
+            ephemeralPublicKey = androidSession.publicKeyBase64Url,
+            spkiSha256 = androidIdentity.certificateSha256Hex,
+            sasMacHex = commitMac,
+            batteryLevel = 73,
+            isCharging = true
+        )
+        val commitFrame = WireFrame(
+            WireMessageType.PAIR_COMMIT,
+            2L,
+            Json.encodeToString(commit).toByteArray()
+        )
+        val decodedCommit = Json.decodeFromString<PairCommitPayload>(
+            WireFrame.decode(commitFrame.encode()).payload.decodeToString()
+        )
+        assertEquals("Samsung SM-A736B", decodedCommit.deviceName)
+        assertEquals(73, decodedCommit.batteryLevel)
+
+        val ack = PairAckPayload(
+            deviceId = macIdentity.deviceId,
+            deviceName = "Skanda MacBook Pro",
+            spkiSha256 = macIdentity.certificateSha256Hex,
+            accepted = true,
+            batteryLevel = 88,
+            isCharging = false
+        )
+        val ackFrame = WireFrame(
+            WireMessageType.PAIR_ACK,
+            3L,
+            Json.encodeToString(ack).toByteArray()
+        )
+        val decodedAck = Json.decodeFromString<PairAckPayload>(
+            WireFrame.decode(ackFrame.encode()).payload.decodeToString()
+        )
+        assertTrue(decodedAck.accepted)
+        assertEquals(88, decodedAck.batteryLevel)
+
+        // Screen Mirroring 0x0D SCREEN_CONTROL + 0x0C SCREEN_FRAME round-trip over ChaCha20
+        val androidCipher = BluetoothSessionCipher(androidDerived.sessionKey, senderTag = "AND0")
+        val macCipher = BluetoothSessionCipher(macDerived.sessionKey, senderTag = "MAC0")
+
+        val ctrl = ScreenControlPayload(action = "start", source = "macos", fps = 15, quality = 60)
+        val ctrlFrame = WireFrame(WireMessageType.SCREEN_CONTROL, 20L, Json.encodeToString(ctrl).toByteArray())
+        val decodedCtrl = Json.decodeFromString<ScreenControlPayload>(
+            macCipher.openFrame(androidCipher.seal(ctrlFrame)).payload.decodeToString()
+        )
+        assertEquals(ctrl, decodedCtrl)
+
+        val jpegPayload = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte()) +
+            ByteArray(2048) { (it and 0xFF).toByte() } +
+            byteArrayOf(0xFF.toByte(), 0xD9.toByte())
+        val pkt = ScreenFramePacket(width = 1280, height = 720, timestampMs = 1_770_000_555_000L, jpegData = jpegPayload)
+        val frame = WireFrame(WireMessageType.SCREEN_FRAME, 21L, pkt.encode())
+        val decodedPkt = ScreenFramePacket.decode(androidCipher.openFrame(macCipher.seal(frame)).payload)
+        assertEquals(pkt, decodedPkt)
+        assertEquals(1280, decodedPkt.width)
+        assertEquals(720, decodedPkt.height)
     }
 }

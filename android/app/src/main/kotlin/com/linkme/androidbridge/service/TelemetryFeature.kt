@@ -3,6 +3,7 @@ package com.linkme.androidbridge.service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioAttributes
 import android.media.Ringtone
 import android.media.RingtoneManager
@@ -19,9 +20,15 @@ import com.linkme.androidbridge.core.protocol.DeviceCommandPayload
 import com.linkme.androidbridge.core.protocol.PingTelemetryPayload
 import kotlin.math.abs
 
+data class BatterySnapshot(
+    val level: Int,
+    val isCharging: Boolean,
+    val batterySaverActive: Boolean
+)
+
 /**
- * Feature 5: Emits PING_TELEMETRY on >= 2% battery delta or charging state change (never polling),
- * and handles "Find My Phone" Ring commands with alarm audio + vibration.
+ * Feature 5: Emits PING_TELEMETRY on >= 2% battery delta, charging change, connect, or 60s pulse,
+ * reads real BatteryManager levels, and handles "Find My Phone" Ring commands.
  */
 class TelemetryFeature(
     private val deviceId: String
@@ -30,6 +37,48 @@ class TelemetryFeature(
     private var lastChargingState: Boolean? = null
     private var activeRingtone: Ringtone? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    fun readCurrentBattery(context: Context): BatterySnapshot {
+        val bm = context.getSystemService(BatteryManager::class.java)
+        val sticky = runCatching {
+            context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        }.getOrNull()
+
+        val propCap = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+            ?.takeIf { it in 0..100 }
+        val stickyPct = sticky?.let { intent ->
+            val lvl = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+            val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100).coerceAtLeast(1)
+            if (lvl >= 0) (lvl * 100) / scale else null
+        }
+        val level = (propCap ?: stickyPct ?: 100).coerceIn(0, 100)
+
+        val stickyStatus = sticky?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        val isCharging = bm?.isCharging == true ||
+            stickyStatus == BatteryManager.BATTERY_STATUS_CHARGING ||
+            stickyStatus == BatteryManager.BATTERY_STATUS_FULL
+
+        val saver = context.getSystemService(PowerManager::class.java)?.isPowerSaveMode ?: false
+        return BatterySnapshot(level = level, isCharging = isCharging, batterySaverActive = saver)
+    }
+
+    fun buildSnapshotPayload(
+        context: Context,
+        transportState: BridgeState,
+        timestampMs: Long = System.currentTimeMillis()
+    ): PingTelemetryPayload {
+        val snap = readCurrentBattery(context)
+        lastReportedLevel = snap.level
+        lastChargingState = snap.isCharging
+        return PingTelemetryPayload(
+            deviceId = deviceId,
+            batteryLevel = snap.level,
+            isCharging = snap.isCharging,
+            batterySaverActive = snap.batterySaverActive,
+            transportState = transportState,
+            timestampMs = timestampMs
+        )
+    }
 
     fun shouldEmitUpdate(batteryLevel: Int, isCharging: Boolean): Boolean {
         if (lastReportedLevel < 0 || lastChargingState == null) return true

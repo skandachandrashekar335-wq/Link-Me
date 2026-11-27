@@ -118,7 +118,7 @@ struct MenuBarDashboardView: View {
                     Circle()
                         .stroke(pal.surfaceHigh, lineWidth: 3)
                     Circle()
-                        .trim(from: 0, to: CGFloat(max(0, min(100, viewModel.peerBatteryPercent))) / 100.0)
+                        .trim(from: 0, to: viewModel.peerBatteryFraction)
                         .stroke(pal.secondaryAccent, style: StrokeStyle(lineWidth: 3, lineCap: .round))
                         .rotationEffect(.degrees(-90))
                     Image(systemName: "iphone")
@@ -143,7 +143,7 @@ struct MenuBarDashboardView: View {
                     }
                     let latLabel = viewModel.latencyMs.map { "\($0)ms" } ?? "--"
                     let modeLabel = viewModel.bridgeState == .activeWifiStream ? "Wi-Fi Turbo" : "Bluetooth E2EE"
-                    Text("\(viewModel.peerBatteryPercent)% • \(modeLabel) • \(latLabel)")
+                    Text("\(viewModel.peerBatteryLabel) • \(modeLabel) • \(latLabel)")
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(pal.secondaryText)
                 }

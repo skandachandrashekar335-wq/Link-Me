@@ -47,6 +47,8 @@ struct BridgeStudioWindow: View {
                             bridgeWorkspace
                         case .pairing:
                             securePairingWorkspace
+                        case .screenMirror:
+                            ScreenMirrorView(viewModel: viewModel)
                         case .activity:
                             activityWorkspace
                         case .customize:
@@ -103,7 +105,7 @@ struct BridgeStudioWindow: View {
             Spacer()
 
             HStack(spacing: 4) {
-                ForEach([StudioTab.bridge, .pairing, .activity, .customize], id: \.self) { tab in
+                ForEach([StudioTab.bridge, .pairing, .screenMirror, .activity, .customize], id: \.self) { tab in
                     let active = viewModel.selectedTab == tab
                     Button {
                         if tab == .pairing && viewModel.pairingUriString.isEmpty {
@@ -134,7 +136,7 @@ struct BridgeStudioWindow: View {
                         .fill(viewModel.peerPaired ? pal.secondaryAccent : Color.orange)
                         .frame(width: 7, height: 7)
                     let modeTag = viewModel.bridgeState == .activeWifiStream ? "mTLS LAN Stream" : "Bluetooth E2EE"
-                    Text("\(viewModel.peerName) • \(viewModel.peerBatteryPercent)% • \(modeTag)")
+                    Text("\(viewModel.peerName) • \(viewModel.peerBatteryLabel) • \(modeTag)")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(pal.onSurface)
                 }
@@ -189,7 +191,8 @@ struct BridgeStudioWindow: View {
 
             sidebarNavItem(.bridge, icon: "rectangle.connected.to.line.below", title: "Bridge")
             sidebarNavItem(.pairing, icon: "qrcode.viewfinder", title: "Secure Pairing")
-            sidebarNavItem(.activity, icon: "clock.arrow.circlepath", title: "Activity Log")
+            sidebarNavItem(.screenMirror, icon: "rectangle.inset.filled.and.person.filled", title: "Screen Mirror")
+            sidebarNavItem(.activity, icon: "clock.arrow.circlepath", title: "Activity")
             sidebarNavItem(.customize, icon: "slider.horizontal.3", title: "Customize")
             sidebarNavItem(.diagnostics, icon: "stethoscope", title: "Diagnostics")
 
@@ -303,7 +306,7 @@ struct BridgeStudioWindow: View {
                 }
 
                 let latString = viewModel.latencyMs.map { "Latency: \($0) ms" } ?? "Latency: Standby"
-                Text("\(latString) • \(viewModel.peerBatteryPercent)% Battery")
+                Text("\(latString) • Peer Battery: \(viewModel.peerBatteryLabel)")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(pal.secondaryText)
             }
@@ -1148,7 +1151,7 @@ struct BridgeStudioWindow: View {
 
     private var telemetryFooter: some View {
         HStack {
-            Text("Android Battery: \(viewModel.peerBatteryPercent)%   •   Transport: \(viewModel.bridgeState == .activeWifiStream ? "Local Wi-Fi mTLS 1.3" : "Encrypted Bluetooth (BLE GATT / L2CAP)")")
+            Text("Mac Battery: \(viewModel.localBatteryPercent)%   •   Peer Battery: \(viewModel.peerBatteryLabel)   •   Transport: \(viewModel.bridgeState == .activeWifiStream ? "Local Wi-Fi mTLS 1.3" : "Encrypted Bluetooth")")
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(pal.secondaryText)
             Spacer()

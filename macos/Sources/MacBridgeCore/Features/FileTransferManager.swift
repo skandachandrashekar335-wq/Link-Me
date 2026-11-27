@@ -42,7 +42,7 @@ public actor FileTransferManager {
     }
 
     public init(destinationRoot: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("MacBridge", isDirectory: true)) {
+        .appendingPathComponent("Link-Me", isDirectory: true)) {
         self.destinationRoot = destinationRoot
     }
 

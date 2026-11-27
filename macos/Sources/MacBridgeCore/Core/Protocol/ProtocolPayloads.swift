@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public enum BridgeState: String, Codable, Sendable, Equatable {
@@ -334,5 +335,151 @@ public struct OpenUrlPayload: Codable, Sendable, Equatable {
 
     public func validateStrict() throws -> URL {
         try UrlSanitizer.validateStrict(url)
+    }
+}
+
+/// Computes & verifies constant-time HMAC proof of X25519 + SAS possession for PAIR_COMMIT (0x0E).
+public enum PairingCommitMac {
+    public static func computeHex(
+        sharedBleSecret: Data,
+        deviceId: String,
+        spkiSha256: String,
+        ephemeralPublicKey: String
+    ) -> String {
+        let message = Data("LinkMe-PAIR-COMMIT-v1|\(deviceId)|\(spkiSha256.lowercased())|\(ephemeralPublicKey)".utf8)
+        let mac = HMAC<SHA256>.authenticationCode(for: message, using: SymmetricKey(data: sharedBleSecret))
+        return mac.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// Signed commitment sent by Android after confirming the 6-digit SAS code (0x0E PAIR_COMMIT).
+public struct PairCommitPayload: Codable, Sendable, Equatable {
+    public let msgType: String
+    public let deviceId: String
+    public let deviceName: String
+    public let platform: String
+    public let ephemeralPublicKey: String
+    public let spkiSha256: String
+    public let sasMacHex: String
+    public let batteryLevel: Int
+    public let isCharging: Bool
+    public let timestampMs: UInt64
+
+    public init(
+        deviceId: String,
+        deviceName: String,
+        platform: String = "android",
+        ephemeralPublicKey: String,
+        spkiSha256: String,
+        sasMacHex: String,
+        batteryLevel: Int,
+        isCharging: Bool,
+        timestampMs: UInt64 = UInt64(Date().timeIntervalSince1970 * 1000)
+    ) {
+        self.msgType = "PAIR_COMMIT"
+        self.deviceId = deviceId
+        self.deviceName = deviceName
+        self.platform = platform
+        self.ephemeralPublicKey = ephemeralPublicKey
+        self.spkiSha256 = spkiSha256.lowercased()
+        self.sasMacHex = sasMacHex.lowercased()
+        self.batteryLevel = min(100, max(0, batteryLevel))
+        self.isCharging = isCharging
+        self.timestampMs = timestampMs
+    }
+}
+
+/// Bidirectional confirmation returned by macOS upon trusting the peer (0x0F PAIR_ACK).
+public struct PairAckPayload: Codable, Sendable, Equatable {
+    public let msgType: String
+    public let deviceId: String
+    public let deviceName: String
+    public let platform: String
+    public let spkiSha256: String
+    public let accepted: Bool
+    public let batteryLevel: Int
+    public let isCharging: Bool
+    public let timestampMs: UInt64
+
+    public init(
+        deviceId: String,
+        deviceName: String,
+        platform: String = "macos",
+        spkiSha256: String,
+        accepted: Bool = true,
+        batteryLevel: Int,
+        isCharging: Bool,
+        timestampMs: UInt64 = UInt64(Date().timeIntervalSince1970 * 1000)
+    ) {
+        self.msgType = "PAIR_ACK"
+        self.deviceId = deviceId
+        self.deviceName = deviceName
+        self.platform = platform
+        self.spkiSha256 = spkiSha256.lowercased()
+        self.accepted = accepted
+        self.batteryLevel = min(100, max(0, batteryLevel))
+        self.isCharging = isCharging
+        self.timestampMs = timestampMs
+    }
+}
+
+/// Screen Mirroring session control (0x0D SCREEN_CONTROL).
+public struct ScreenControlPayload: Codable, Sendable, Equatable {
+    public let action: String   // "start" | "stop"
+    public let source: String   // "macos" | "android"
+    public let fps: Int
+    public let quality: Int
+
+    public init(action: String, source: String, fps: Int = 15, quality: Int = 60) {
+        self.action = action
+        self.source = source
+        self.fps = min(30, max(1, fps))
+        self.quality = min(95, max(20, quality))
+    }
+}
+
+/// Binary payload layout for 0x0C SCREEN_FRAME:
+/// 2B width BE + 2B height BE + 8B timestampMs BE + JPEG compressed image bytes.
+public struct ScreenFramePacket: Sendable, Equatable {
+    public static let headerSize = 12
+    public static let maxJpegBytes = Int(WireFrame.maxControlFrameBytes) - headerSize
+
+    public let width: UInt16
+    public let height: UInt16
+    public let timestampMs: UInt64
+    public let jpegData: Data
+
+    public init(width: UInt16, height: UInt16, timestampMs: UInt64, jpegData: Data) throws {
+        guard width > 0, height > 0, !jpegData.isEmpty, jpegData.count <= Self.maxJpegBytes else {
+            throw ProtocolPayloadError.invalidFileChunk
+        }
+        self.width = width
+        self.height = height
+        self.timestampMs = timestampMs
+        self.jpegData = jpegData
+    }
+
+    public func encode() -> Data {
+        var out = Data(capacity: Self.headerSize + jpegData.count)
+        var wBE = width.bigEndian
+        withUnsafeBytes(of: &wBE) { out.append(contentsOf: $0) }
+        var hBE = height.bigEndian
+        withUnsafeBytes(of: &hBE) { out.append(contentsOf: $0) }
+        var tsBE = timestampMs.bigEndian
+        withUnsafeBytes(of: &tsBE) { out.append(contentsOf: $0) }
+        out.append(jpegData)
+        return out
+    }
+
+    public static func decode(from payload: Data) throws -> ScreenFramePacket {
+        guard payload.count > headerSize else {
+            throw ProtocolPayloadError.invalidFileChunk
+        }
+        let s = payload.startIndex
+        let w = (UInt16(payload[s]) << 8) | UInt16(payload[s + 1])
+        let h = (UInt16(payload[s + 2]) << 8) | UInt16(payload[s + 3])
+        let ts = FrameDecoder.readUInt64BE(payload, offset: 4)
+        let jpeg = Data(payload[(s + headerSize)..<payload.endIndex])
+        return try ScreenFramePacket(width: w, height: h, timestampMs: ts, jpegData: jpeg)
     }
 }

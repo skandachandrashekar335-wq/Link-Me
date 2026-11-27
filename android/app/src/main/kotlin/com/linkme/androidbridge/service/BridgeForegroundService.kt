@@ -33,6 +33,11 @@ import com.linkme.androidbridge.core.protocol.FileResponsePayload
 import com.linkme.androidbridge.core.protocol.FrameEncoder
 import com.linkme.androidbridge.core.protocol.MediaControlPayload
 import com.linkme.androidbridge.core.protocol.OpenUrlPayload
+import com.linkme.androidbridge.core.protocol.PairAckPayload
+import com.linkme.androidbridge.core.protocol.PairCommitPayload
+import com.linkme.androidbridge.core.protocol.PingTelemetryPayload
+import com.linkme.androidbridge.core.protocol.ScreenControlPayload
+import com.linkme.androidbridge.core.protocol.ScreenFramePacket
 import com.linkme.androidbridge.core.protocol.WakeWifiPayload
 import com.linkme.androidbridge.core.protocol.WireFrame
 import com.linkme.androidbridge.core.protocol.WireMessageType
@@ -54,6 +59,10 @@ import java.io.File
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -86,6 +95,12 @@ class BridgeForegroundService : Service() {
 
     private var powerSaveReceiver: BroadcastReceiver? = null
     private var batteryReceiver: BroadcastReceiver? = null
+    private var clipboardListener: ClipboardManager.OnPrimaryClipChangedListener? = null
+    private var telemetryScheduler: ScheduledExecutorService? = null
+    private val fileSendQueue = ConcurrentLinkedQueue<String>()
+    private val fileSendBusy = AtomicBoolean(false)
+    @Volatile private var mirrorFpsWindowStartMs: Long = 0L
+    @Volatile private var mirrorFrameCounter: Int = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -124,8 +139,15 @@ class BridgeForegroundService : Service() {
     override fun onDestroy() {
         runCatching { powerSaveReceiver?.let { unregisterReceiver(it) } }
         runCatching { batteryReceiver?.let { unregisterReceiver(it) } }
+        runCatching {
+            val sysClipboard = getSystemService(ClipboardManager::class.java)
+            clipboardListener?.let { sysClipboard?.removePrimaryClipChangedListener(it) }
+        }
+        runCatching { telemetryScheduler?.shutdownNow() }
         powerSaveReceiver = null
         batteryReceiver = null
+        clipboardListener = null
+        telemetryScheduler = null
         BridgeNotificationListener.onNotificationEvent = null
         NotificationCompanionBridge.onNotificationEvent = null
         BridgeActivityHub.onSendMediaAction = null
@@ -133,8 +155,11 @@ class BridgeForegroundService : Service() {
         BridgeActivityHub.onSendFileUri = null
         BridgeActivityHub.onResolvePendingFileOffer = null
         BridgeActivityHub.onSendPairHello = null
+        BridgeActivityHub.onSendPairCommit = null
         BridgeActivityHub.onSendDeviceCommand = null
         BridgeActivityHub.onPeerTrustedUpdated = null
+        BridgeActivityHub.onRequestRemoteScreenMirror = null
+        BridgeActivityHub.onSendScreenFrameBytes = null
         onManualClipboardSyncRequested = null
 
         runCatching { stopWifiTransport() }
@@ -204,6 +229,9 @@ class BridgeForegroundService : Service() {
             preferencesStore = prefsStore
             transportManager = transport
             clipboardSyncManager = clipSync
+
+            val initialSnap = telemetry.readCurrentBattery(this)
+            BridgeActivityHub.updateLocalBattery(initialSnap.level, initialSnap.isCharging)
 
             serviceScope.launch {
                 prefsStore.state.collect { prefs ->
@@ -288,6 +316,9 @@ class BridgeForegroundService : Service() {
                     BridgeActivityHub.updateConnectionState(
                         bleConnected = connected || (bleGattClient?.isConnected == true)
                     )
+                    if (connected && store.allPeers().isNotEmpty()) {
+                        serviceScope.launch { emitImmediateTelemetry() }
+                    }
                 }
             )
             blePeripheralManager = peripheral
@@ -304,6 +335,9 @@ class BridgeForegroundService : Service() {
                     BridgeActivityHub.updateConnectionState(
                         bleConnected = connected || peripheral.isClientConnected
                     )
+                    if (connected && store.allPeers().isNotEmpty()) {
+                        serviceScope.launch { emitImmediateTelemetry() }
+                    }
                 },
                 onLatencyMeasured = { rttMs ->
                     BridgeActivityHub.updateConnectionState(latency = rttMs)
@@ -311,6 +345,7 @@ class BridgeForegroundService : Service() {
             )
             bleGattClient = gattClient
             if (pairedPeer != null) {
+                BridgeActivityHub.updatePeerTelemetry(name = pairedPeer.deviceName)
                 gattClient.startScanning(autoReconnect = true)
             }
 
@@ -340,6 +375,42 @@ class BridgeForegroundService : Service() {
                 }
             }
 
+            BridgeActivityHub.onSendPairCommit = { commit, lanHost, tcpPort ->
+                serviceScope.launch {
+                    val payloadBytes = json.encodeToString(commit).toByteArray(Charsets.UTF_8)
+                    val commitFrame = WireFrame(WireMessageType.PAIR_COMMIT, 2L, payloadBytes)
+                    gattClient.sendPairingFrameOverBle(commitFrame)
+                    if (!lanHost.isNullOrBlank() && tcpPort > 0) {
+                        runCatching {
+                            Socket().use { sock ->
+                                sock.soTimeout = 3500
+                                sock.connect(InetSocketAddress(lanHost, tcpPort), 2500)
+                                val out = sock.getOutputStream()
+                                out.write(FrameEncoder.encode(commitFrame))
+                                out.flush()
+                                val buf = ByteArray(16_384)
+                                val read = runCatching { sock.getInputStream().read(buf) }.getOrDefault(-1)
+                                if (read > 0) {
+                                    val decoder = com.linkme.androidbridge.core.protocol.FrameDecoder()
+                                    decoder.append(buf.copyOf(read))
+                                    for (replyFrame in decoder.drainFrames()) {
+                                        routeInboundFrame(replyFrame)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    runCatching { emitImmediateTelemetry() }
+                    BridgeActivityHub.record(
+                        BridgeActivityItem(
+                            category = ActivityCategory.SYSTEM,
+                            title = "PAIR_COMMIT Transmitted",
+                            detail = "${commit.deviceName} (${commit.batteryLevel}%)"
+                        )
+                    )
+                }
+            }
+
             BridgeActivityHub.onSendDeviceCommand = { command ->
                 serviceScope.launch {
                     runCatching {
@@ -353,51 +424,47 @@ class BridgeForegroundService : Service() {
             BridgeActivityHub.onPeerTrustedUpdated = {
                 serviceScope.launch {
                     gattClient.startScanning(autoReconnect = true)
+                    emitImmediateTelemetry()
+                }
+            }
+
+            BridgeActivityHub.onRequestRemoteScreenMirror = { start, fps, quality ->
+                serviceScope.launch {
+                    runCatching {
+                        val ctrl = ScreenControlPayload(
+                            action = if (start) "start" else "stop",
+                            source = "macos",
+                            fps = fps,
+                            quality = quality
+                        )
+                        val frame = transport.makeFrame(
+                            WireMessageType.SCREEN_CONTROL,
+                            json.encodeToString(ctrl).toByteArray(Charsets.UTF_8)
+                        )
+                        transport.sendResilientFrame(frame, preferBle = true)
+                    }
+                }
+            }
+
+            BridgeActivityHub.onSendScreenFrameBytes = { width, height, timestampMs, jpegBytes ->
+                serviceScope.launch {
+                    runCatching {
+                        val packet = ScreenFramePacket(width, height, timestampMs, jpegBytes)
+                        val frame = transport.makeFrame(WireMessageType.SCREEN_FRAME, packet.encode())
+                        transport.sendResilientFrame(frame, preferBle = false)
+                    }
                 }
             }
 
             BridgeActivityHub.onSendFileUri = { uriStr ->
-                serviceScope.launch {
-                    runCatching {
-                        val uri = android.net.Uri.parse(uriStr)
-                        var displayName = "shared_file.bin"
-                        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-                            if (c.moveToFirst()) {
-                                val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                                if (idx >= 0) displayName = c.getString(idx) ?: displayName
-                            }
-                        }
-                        val safeName = com.linkme.androidbridge.core.protocol.FilenameSanitizer.sanitize(displayName)
-                        val stagingDir = File(cacheDir, "outbound_staging").apply { mkdirs() }
-                        val staged = File(stagingDir, safeName)
-                        contentResolver.openInputStream(uri)?.use { input ->
-                            staged.outputStream().use { out ->
-                                val buf = ByteArray(FileTransferManager.CHUNK_SIZE)
-                                while (true) {
-                                    val n = input.read(buf)
-                                    if (n <= 0) break
-                                    out.write(buf, 0, n)
-                                }
-                            }
-                        }
-                        try {
-                            transferMgr.streamOutboundFile(
-                                sourceFile = staged,
-                                emitFrame = { frame -> transport.sendResilientFrame(frame, preferBle = false) }
-                            )
-                            BridgeActivityHub.record(
-                                BridgeActivityItem(
-                                    category = ActivityCategory.FILES,
-                                    title = "Sent File to Mac",
-                                    detail = safeName,
-                                    fileUriString = uriStr
-                                )
-                            )
-                        } finally {
-                            staged.delete()
-                        }
-                    }
-                }
+                fileSendQueue.offer(uriStr)
+                drainOutboundFileQueue()
+            }
+            BridgeActivityHub.drainPendingFileUris().forEach { uriStr ->
+                fileSendQueue.offer(uriStr)
+            }
+            if (!fileSendQueue.isEmpty()) {
+                drainOutboundFileQueue()
             }
 
             val powerMgr = getSystemService(PowerManager::class.java)
@@ -421,21 +488,56 @@ class BridgeForegroundService : Service() {
             val battReceiver = telemetry.createBatteryReceiver(
                 currentStateProvider = { transport.bridgeState },
                 onTelemetryReady = { payload ->
+                    BridgeActivityHub.updateLocalBattery(payload.batteryLevel, payload.isCharging)
                     serviceScope.launch {
                         runCatching {
                             val bytes = json.encodeToString(payload).toByteArray(Charsets.UTF_8)
-                            transport.sendFrame(
-                                WireMessageType.PING_TELEMETRY,
-                                bytes,
-                                TransferPriority.LOW_LATENCY_CONTROL,
-                                localIdentity.deviceId
-                            )
+                            val frame = transport.makeFrame(WireMessageType.PING_TELEMETRY, bytes)
+                            transport.sendResilientFrame(frame, preferBle = true)
                         }
                     }
                 }
             )
             batteryReceiver = battReceiver
             registerReceiver(battReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+
+            telemetryScheduler = Executors.newSingleThreadScheduledExecutor().also { sched ->
+                sched.scheduleAtFixedRate(
+                    {
+                        if (store.allPeers().isNotEmpty()) {
+                            serviceScope.launch { runCatching { emitImmediateTelemetry() } }
+                        }
+                    },
+                    60L,
+                    60L,
+                    TimeUnit.SECONDS
+                )
+            }
+
+            val clipChanged = ClipboardManager.OnPrimaryClipChangedListener {
+                serviceScope.launch {
+                    runCatching {
+                        val clip = sysClipboard?.primaryClip
+                        val clipText = clip?.getItemAt(0)?.text?.toString()
+                        val sensitive = clipSync.isSensitiveClip(sysClipboard?.primaryClipDescription?.extras)
+                        if (!clipText.isNullOrEmpty()) {
+                            val sent = clipSync.processLocalCopy(clipText, sensitive)
+                            if (sent != null) {
+                                BridgeActivityHub.record(
+                                    BridgeActivityItem(
+                                        category = ActivityCategory.CLIPBOARD,
+                                        title = "Clipboard Synced to Mac",
+                                        detail = clipText.take(120),
+                                        clipboardText = clipText
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            clipboardListener = clipChanged
+            sysClipboard?.addPrimaryClipChangedListener(clipChanged)
 
             val forwardNotificationEvent: (com.linkme.androidbridge.core.protocol.NotificationEventPayload) -> Unit = { event ->
                 serviceScope.launch {
@@ -587,6 +689,7 @@ class BridgeForegroundService : Service() {
                                     verifiedFile,
                                     "application/octet-stream"
                                 )
+                                postFileReceivedNotification(verifiedFile.name, exportedUri)
                                 BridgeActivityHub.record(
                                     BridgeActivityItem(
                                         category = ActivityCategory.FILES,
@@ -598,6 +701,76 @@ class BridgeForegroundService : Service() {
                             }
                         }
                 }
+            }
+
+            WireMessageType.PING_TELEMETRY -> {
+                runCatching { json.decodeFromString<PingTelemetryPayload>(frame.payload.decodeToString()) }
+                    .onSuccess { ping ->
+                        BridgeActivityHub.updatePeerTelemetry(
+                            percent = ping.batteryLevel,
+                            charging = ping.isCharging
+                        )
+                    }
+            }
+
+            WireMessageType.PAIR_ACK -> {
+                runCatching { json.decodeFromString<PairAckPayload>(frame.payload.decodeToString()) }
+                    .onSuccess { ack ->
+                        BridgeActivityHub.updatePeerTelemetry(
+                            percent = ack.batteryLevel,
+                            charging = ack.isCharging,
+                            name = ack.deviceName
+                        )
+                        BridgeActivityHub.record(
+                            BridgeActivityItem(
+                                category = ActivityCategory.SYSTEM,
+                                title = "PAIR_ACK Confirmed",
+                                detail = "${ack.deviceName} • ${ack.batteryLevel}%"
+                            )
+                        )
+                    }
+            }
+
+            WireMessageType.SCREEN_CONTROL -> {
+                runCatching { json.decodeFromString<ScreenControlPayload>(frame.payload.decodeToString()) }
+                    .onSuccess { ctrl ->
+                        if (ctrl.source == "android" && ctrl.action == "stop") {
+                            val stopIntent = Intent(this, ScreenMirrorService::class.java).apply {
+                                action = ScreenMirrorService.ACTION_STOP
+                            }
+                            runCatching { startService(stopIntent) }
+                        } else if (ctrl.source == "android" && ctrl.action == "start") {
+                            BridgeActivityHub.updateMirrorState {
+                                it.copy(statusText = "Mac requested Android screen — open Mirror tab & tap Share Phone Screen")
+                            }
+                        }
+                    }
+            }
+
+            WireMessageType.SCREEN_FRAME -> {
+                runCatching { ScreenFramePacket.decode(frame.payload) }
+                    .onSuccess { pkt ->
+                        val now = System.currentTimeMillis()
+                        if (mirrorFpsWindowStartMs == 0L) mirrorFpsWindowStartMs = now
+                        mirrorFrameCounter += 1
+                        val elapsed = now - mirrorFpsWindowStartMs
+                        var computedFps: Int? = null
+                        if (elapsed >= 1000L) {
+                            computedFps = maxOf(1, (mirrorFrameCounter * 1000L / elapsed).toInt())
+                            mirrorFrameCounter = 0
+                            mirrorFpsWindowStartMs = now
+                        }
+                        BridgeActivityHub.updateMirrorState { prev ->
+                            prev.copy(
+                                isViewingRemote = true,
+                                remoteWidth = pkt.width,
+                                remoteHeight = pkt.height,
+                                remoteFps = computedFps ?: prev.remoteFps,
+                                latestJpegBytes = pkt.jpegData,
+                                statusText = "Live • ${pkt.width}×${pkt.height}"
+                            )
+                        }
+                    }
             }
 
             WireMessageType.DEVICE_COMMAND -> {
@@ -685,6 +858,116 @@ class BridgeForegroundService : Service() {
             .addAction(0, "Send Clipboard to Mac", syncPendingIntent)
             .setOngoing(true)
             .build()
+    }
+
+    private fun emitImmediateTelemetry() {
+        val telemetry = telemetryFeature ?: return
+        val transport = transportManager ?: return
+        val payload = telemetry.buildSnapshotPayload(this, transport.bridgeState)
+        BridgeActivityHub.updateLocalBattery(payload.batteryLevel, payload.isCharging)
+        val bytes = json.encodeToString(payload).toByteArray(Charsets.UTF_8)
+        val frame = transport.makeFrame(WireMessageType.PING_TELEMETRY, bytes)
+        runCatching { transport.sendResilientFrame(frame, preferBle = true) }
+    }
+
+    private fun drainOutboundFileQueue() {
+        if (!fileSendBusy.compareAndSet(false, true)) return
+        serviceScope.launch {
+            try {
+                val transferMgr = fileTransferManager ?: return@launch
+                val transport = transportManager ?: return@launch
+                while (true) {
+                    val uriStr = fileSendQueue.poll() ?: break
+                    runCatching {
+                        val uri = android.net.Uri.parse(uriStr)
+                        var displayName = "shared_file.bin"
+                        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                            if (c.moveToFirst()) {
+                                val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                                if (idx >= 0) displayName = c.getString(idx) ?: displayName
+                            }
+                        }
+                        val safeName = com.linkme.androidbridge.core.protocol.FilenameSanitizer.sanitize(displayName)
+                        val stagingDir = File(cacheDir, "outbound_staging").apply { mkdirs() }
+                        val staged = File(stagingDir, safeName)
+                        contentResolver.openInputStream(uri)?.use { input ->
+                            staged.outputStream().use { out ->
+                                val buf = ByteArray(FileTransferManager.CHUNK_SIZE)
+                                while (true) {
+                                    val n = input.read(buf)
+                                    if (n <= 0) break
+                                    out.write(buf, 0, n)
+                                }
+                            }
+                        }
+                        try {
+                            val transportLabel = if (BridgeActivityHub.wifiConnected.value) "Wi-Fi mTLS" else "BLE E2EE"
+                            transferMgr.streamOutboundFile(
+                                sourceFile = staged,
+                                onProgress = { p ->
+                                    BridgeActivityHub.updateFileTransfer(
+                                        FileTransferUiState(
+                                            filename = p.filename,
+                                            bytesTransferred = p.bytesTransferred,
+                                            totalBytes = p.totalBytes,
+                                            queueRemaining = fileSendQueue.size,
+                                            transportLabel = transportLabel
+                                        )
+                                    )
+                                },
+                                emitFrame = { frame -> transport.sendResilientFrame(frame, preferBle = false) }
+                            )
+                            BridgeActivityHub.record(
+                                BridgeActivityItem(
+                                    category = ActivityCategory.FILES,
+                                    title = "Sent File to Mac",
+                                    detail = "$safeName ($transportLabel)",
+                                    fileUriString = uriStr
+                                )
+                            )
+                        } finally {
+                            staged.delete()
+                            BridgeActivityHub.updateFileTransfer(null)
+                        }
+                    }.onFailure { err ->
+                        BridgeActivityHub.updateFileTransfer(null)
+                        BridgeActivityHub.record(
+                            BridgeActivityItem(
+                                category = ActivityCategory.FILES,
+                                title = "File Send Failed",
+                                detail = err.message ?: "Transport unreachable"
+                            )
+                        )
+                    }
+                }
+            } finally {
+                fileSendBusy.set(false)
+            }
+        }
+    }
+
+    private fun postFileReceivedNotification(filename: String, exportedUri: android.net.Uri?) {
+        val mgr = getSystemService(NotificationManager::class.java) ?: return
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Saved to Downloads/Link-Me")
+            .setContentText(filename)
+            .setSmallIcon(R.drawable.ic_stat_linkme)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+        if (exportedUri != null) {
+            val viewIntent = Intent(Intent.ACTION_VIEW, exportedUri).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val pending = PendingIntent.getActivity(
+                this,
+                filename.hashCode(),
+                viewIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.setContentIntent(pending)
+            builder.addAction(0, "Open File", pending)
+        }
+        mgr.notify(filename.hashCode() and 0x7FFFFFFF, builder.build())
     }
 
     companion object {

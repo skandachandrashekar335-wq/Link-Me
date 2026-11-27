@@ -4,6 +4,8 @@ import kotlinx.serialization.Serializable
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 @Serializable
 enum class BridgeState {
@@ -190,4 +192,108 @@ data class OpenUrlPayload(
     val url: String
 ) {
     fun validateStrict(): String = UrlSanitizer.validateStrict(url)
+}
+
+object PairingCommitMac {
+    fun computeHex(
+        sharedBleSecret: ByteArray,
+        deviceId: String,
+        spkiSha256: String,
+        ephemeralPublicKey: String
+    ): String {
+        val msg = "LinkMe-PAIR-COMMIT-v1|$deviceId|${spkiSha256.lowercase()}|$ephemeralPublicKey"
+            .toByteArray(Charsets.UTF_8)
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(sharedBleSecret, "HmacSHA256"))
+        return mac.doFinal(msg).joinToString("") { "%02x".format(it) }
+    }
+}
+
+@Serializable
+data class PairCommitPayload(
+    val msgType: String = "PAIR_COMMIT",
+    val deviceId: String,
+    val deviceName: String,
+    val platform: String = "android",
+    val ephemeralPublicKey: String,
+    val spkiSha256: String,
+    val sasMacHex: String,
+    val batteryLevel: Int,
+    val isCharging: Boolean,
+    val timestampMs: Long = System.currentTimeMillis()
+)
+
+@Serializable
+data class PairAckPayload(
+    val msgType: String = "PAIR_ACK",
+    val deviceId: String,
+    val deviceName: String,
+    val platform: String = "macos",
+    val spkiSha256: String,
+    val accepted: Boolean = true,
+    val batteryLevel: Int,
+    val isCharging: Boolean,
+    val timestampMs: Long = System.currentTimeMillis()
+)
+
+@Serializable
+data class ScreenControlPayload(
+    val action: String,
+    val source: String,
+    val fps: Int = 15,
+    val quality: Int = 60
+)
+
+data class ScreenFramePacket(
+    val width: Int,
+    val height: Int,
+    val timestampMs: Long,
+    val jpegData: ByteArray
+) {
+    init {
+        require(width in 1..65535 && height in 1..65535) { "Invalid screen frame dimensions" }
+        require(jpegData.isNotEmpty() && jpegData.size <= WireFrame.MAX_CONTROL_FRAME_BYTES - HEADER_SIZE) {
+            "Screen frame JPEG exceeds max WireFrame bounds"
+        }
+    }
+
+    fun encode(): ByteArray {
+        val buf = ByteBuffer.allocate(HEADER_SIZE + jpegData.size).order(ByteOrder.BIG_ENDIAN)
+        buf.putShort(width.toShort())
+        buf.putShort(height.toShort())
+        buf.putLong(timestampMs)
+        buf.put(jpegData)
+        return buf.array()
+    }
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is ScreenFramePacket) return false
+        return width == other.width &&
+            height == other.height &&
+            timestampMs == other.timestampMs &&
+            jpegData.contentEquals(other.jpegData)
+    }
+
+    override fun hashCode(): Int {
+        var result = width
+        result = 31 * result + height
+        result = 31 * result + timestampMs.hashCode()
+        result = 31 * result + jpegData.contentHashCode()
+        return result
+    }
+
+    companion object {
+        const val HEADER_SIZE = 12
+
+        fun decode(payload: ByteArray): ScreenFramePacket {
+            require(payload.size > HEADER_SIZE) { "Invalid SCREEN_FRAME subheader" }
+            val buf = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN)
+            val w = buf.short.toInt() and 0xFFFF
+            val h = buf.short.toInt() and 0xFFFF
+            val ts = buf.long
+            val jpeg = ByteArray(payload.size - HEADER_SIZE).also { buf.get(it) }
+            return ScreenFramePacket(width = w, height = h, timestampMs = ts, jpegData = jpeg)
+        }
+    }
 }

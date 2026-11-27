@@ -1,7 +1,10 @@
 package com.linkme.androidbridge.ui
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
+import android.os.BatteryManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
@@ -83,7 +86,9 @@ import com.linkme.androidbridge.core.crypto.IdentityManager
 import com.linkme.androidbridge.core.crypto.PairingCrypto
 import com.linkme.androidbridge.core.crypto.PairingUriPayload
 import com.linkme.androidbridge.core.prefs.BridgePreferencesStore
+import com.linkme.androidbridge.core.protocol.PairCommitPayload
 import com.linkme.androidbridge.core.protocol.PairHelloPayload
+import com.linkme.androidbridge.core.protocol.PairingCommitMac
 import com.linkme.androidbridge.service.BridgeActivityHub
 import com.linkme.androidbridge.ui.theme.LocalBridgePalette
 import kotlinx.coroutines.Dispatchers
@@ -97,7 +102,13 @@ private data class ParsedPairingState(
     val sasCode: String,
     val pinnedCertSha256: String,
     val sharedBleSecret: ByteArray,
-    val sessionKey: ByteArray
+    val sessionKey: ByteArray,
+    val lanHost: String?,
+    val tcpPort: Int,
+    val localDeviceId: String,
+    val localDeviceName: String,
+    val localEphemeralPublicKey: String,
+    val localSpkiSha256: String
 )
 
 /**
@@ -157,10 +168,20 @@ fun QrScannerScreen(
                 val localIdentity = withContext(Dispatchers.IO) {
                     IdentityManager(useAndroidKeyStore = true).loadOrCreateIdentity()
                 }
-                val alias = BridgePreferencesStore.forContext(context).state.value.deviceAlias
+                val prefsAlias = BridgePreferencesStore.forContext(context).state.value.deviceAlias
+                val hardwareModel = if (Build.MODEL.startsWith(Build.MANUFACTURER, ignoreCase = true)) {
+                    Build.MODEL
+                } else {
+                    "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}"
+                }
+                val advertisedDeviceName = if (prefsAlias.isBlank() || prefsAlias == "AndroidBridge") {
+                    hardwareModel
+                } else {
+                    "$prefsAlias ($hardwareModel)"
+                }
                 val hello = PairHelloPayload(
                     deviceId = localIdentity.deviceId,
-                    deviceName = alias,
+                    deviceName = advertisedDeviceName,
                     platform = "android",
                     ephemeralPublicKey = crypto.publicKeyBase64Url,
                     spkiSha256 = localIdentity.certificateSha256Hex
@@ -179,7 +200,13 @@ fun QrScannerScreen(
                     sasCode = derived.sasCode,
                     pinnedCertSha256 = resolvedFp,
                     sharedBleSecret = derived.sharedBleSecret,
-                    sessionKey = derived.sessionKey
+                    sessionKey = derived.sessionKey,
+                    lanHost = parsed.lanHost,
+                    tcpPort = parsed.tcpPort,
+                    localDeviceId = localIdentity.deviceId,
+                    localDeviceName = advertisedDeviceName,
+                    localEphemeralPublicKey = crypto.publicKeyBase64Url,
+                    localSpkiSha256 = localIdentity.certificateSha256Hex
                 )
             }.onSuccess { result ->
                 qrDetectedBadge = true
@@ -539,10 +566,30 @@ fun QrScannerScreen(
                     Button(
                         onClick = {
                             if (active.pinnedCertSha256.length != 64 || !active.pinnedCertSha256.all { it in '0'..'9' || it in 'a'..'f' }) {
-                                errorMessage = "Full 64-hex TLS certificate pin required; scan a v1.0.0 MacBridge QR or enter pin below."
+                                errorMessage = "Full 64-hex TLS certificate pin required; scan a v1.1.0 MacBridge QR or enter pin below."
                                 showManualFallback = true
                                 return@Button
                             }
+                            val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+                            val battPct = (bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+                                ?.takeIf { it in 0..100 } ?: 100)
+                            val charging = bm?.isCharging == true
+                            val macHex = PairingCommitMac.computeHex(
+                                sharedBleSecret = active.sharedBleSecret,
+                                deviceId = active.localDeviceId,
+                                spkiSha256 = active.localSpkiSha256,
+                                ephemeralPublicKey = active.localEphemeralPublicKey
+                            )
+                            val commit = PairCommitPayload(
+                                deviceId = active.localDeviceId,
+                                deviceName = active.localDeviceName,
+                                platform = "android",
+                                ephemeralPublicKey = active.localEphemeralPublicKey,
+                                spkiSha256 = active.localSpkiSha256,
+                                sasMacHex = macHex,
+                                batteryLevel = battPct,
+                                isCharging = charging
+                            )
                             onConfirmTrustedPeer(
                                 active.peerId,
                                 active.peerName,
@@ -550,6 +597,7 @@ fun QrScannerScreen(
                                 active.sharedBleSecret,
                                 active.sessionKey
                             )
+                            BridgeActivityHub.onSendPairCommit?.invoke(commit, active.lanHost, active.tcpPort)
                         },
                         modifier = Modifier
                             .fillMaxWidth()

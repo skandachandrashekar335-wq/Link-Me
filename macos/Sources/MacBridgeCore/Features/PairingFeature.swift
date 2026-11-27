@@ -85,6 +85,69 @@ public actor PairingFeature {
         return approval
     }
 
+    public func handleIncomingPairCommit(
+        _ commit: PairCommitPayload,
+        now: Date = Date()
+    ) throws -> (peer: TrustedPeer, ack: PairAckPayload) {
+        guard let session = activeSession else {
+            throw PairingCryptoError.sessionExpired
+        }
+        let derived = try session.deriveSecrets(
+            peerPublicKeyString: commit.ephemeralPublicKey,
+            nonce: session.nonce,
+            now: now
+        )
+        let expectedMacHex = PairingCommitMac.computeHex(
+            sharedBleSecret: derived.sharedBleSecret,
+            deviceId: commit.deviceId,
+            spkiSha256: commit.spkiSha256,
+            ephemeralPublicKey: commit.ephemeralPublicKey
+        )
+        guard let expectedData = Data(hexString: expectedMacHex),
+              let providedData = Data(hexString: commit.sasMacHex),
+              ConstantTime.equals(expectedData, providedData) else {
+            throw PairingCryptoError.invalidPeerPublicKey
+        }
+
+        let peer = TrustedPeer(
+            deviceId: commit.deviceId,
+            deviceName: commit.deviceName,
+            pinnedCertSha256: commit.spkiSha256,
+            sharedBleSecret: derived.sharedBleSecret,
+            bluetoothSessionKey: derived.sessionKey
+        )
+        try trustStore.savePeer(peer)
+        activeSession = nil
+        pendingApproval = nil
+
+        let identity = try identityManager.loadOrCreateIdentity()
+        let battery = MacBatteryMonitor.readBattery()
+        let ack = PairAckPayload(
+            deviceId: identity.deviceId,
+            deviceName: Host.current().localizedName ?? "MacBridge",
+            platform: "macos",
+            spkiSha256: identity.certificateSha256Hex,
+            accepted: true,
+            batteryLevel: battery.level,
+            isCharging: battery.isCharging
+        )
+        return (peer, ack)
+    }
+
+    public func buildPairAck(deviceName: String? = nil) throws -> PairAckPayload {
+        let identity = try identityManager.loadOrCreateIdentity()
+        let battery = MacBatteryMonitor.readBattery()
+        return PairAckPayload(
+            deviceId: identity.deviceId,
+            deviceName: deviceName ?? (Host.current().localizedName ?? "MacBridge"),
+            platform: "macos",
+            spkiSha256: identity.certificateSha256Hex,
+            accepted: true,
+            batteryLevel: battery.level,
+            isCharging: battery.isCharging
+        )
+    }
+
     public func confirmAndTrust() throws -> TrustedPeer {
         guard let approval = pendingApproval else {
             throw PairingCryptoError.sessionExpired
@@ -99,8 +162,6 @@ public actor PairingFeature {
         try trustStore.savePeer(peer)
         activeSession = nil
         pendingApproval = nil
-        listener?.cancel()
-        listener = nil
         return peer
     }
 
@@ -114,7 +175,8 @@ public actor PairingFeature {
     public func startTemporaryListener(
         parameters: NWParameters = .tcp,
         onReadyPort: @escaping @Sendable (UInt16) -> Void,
-        onPairHelloReceived: (@Sendable (PairHelloPayload) -> Void)? = nil
+        onPairHelloReceived: (@Sendable (PairHelloPayload) -> Void)? = nil,
+        onPairCommitReceived: (@Sendable (PairCommitPayload) async -> PairAckPayload?)? = nil
     ) throws {
         listener?.cancel()
         let newListener = try NWListener(using: parameters)
@@ -127,7 +189,11 @@ public actor PairingFeature {
         }
         newListener.newConnectionHandler = { connection in
             connection.start(queue: DispatchQueue(label: "com.linkme.macbridge.pairing-conn"))
-            Self.readPairHelloFrame(from: connection, onPairHelloReceived: onPairHelloReceived)
+            Self.readPairingFrames(
+                from: connection,
+                onPairHelloReceived: onPairHelloReceived,
+                onPairCommitReceived: onPairCommitReceived
+            )
         }
         newListener.start(queue: DispatchQueue(label: "com.linkme.macbridge.pairing-listener"))
         self.listener = newListener
@@ -137,20 +203,53 @@ public actor PairingFeature {
         self.activeListeningPort = port
     }
 
-    private static func readPairHelloFrame(
+    private static func readPairingFrames(
         from connection: NWConnection,
-        onPairHelloReceived: (@Sendable (PairHelloPayload) -> Void)?
+        onPairHelloReceived: (@Sendable (PairHelloPayload) -> Void)?,
+        onPairCommitReceived: (@Sendable (PairCommitPayload) async -> PairAckPayload?)?
     ) {
-        connection.receive(minimumIncompleteLength: 16, maximumLength: 65_536) { data, _, _, _ in
-            guard let data,
-                  let frame = try? WireFrame.decode(from: data),
-                  frame.messageType == .pairHello,
-                  let hello = try? JSONDecoder().decode(PairHelloPayload.self, from: frame.payload) else {
+        connection.receive(minimumIncompleteLength: 16, maximumLength: 65_536) { data, _, isComplete, error in
+            guard let data, error == nil else {
                 connection.cancel()
                 return
             }
-            onPairHelloReceived?(hello)
-            connection.cancel()
+            if let frame = try? WireFrame.decode(from: data) {
+                switch frame.messageType {
+                case .pairHello:
+                    if let hello = try? JSONDecoder().decode(PairHelloPayload.self, from: frame.payload) {
+                        onPairHelloReceived?(hello)
+                    }
+                    if !isComplete {
+                        Self.readPairingFrames(
+                            from: connection,
+                            onPairHelloReceived: onPairHelloReceived,
+                            onPairCommitReceived: onPairCommitReceived
+                        )
+                    } else {
+                        connection.cancel()
+                    }
+                case .pairCommit:
+                    if let commit = try? JSONDecoder().decode(PairCommitPayload.self, from: frame.payload) {
+                        Task {
+                            if let ack = await onPairCommitReceived?(commit),
+                               let ackData = try? JSONEncoder().encode(ack),
+                               let ackFrame = try? WireFrame(messageType: .pairAck, sequenceId: frame.sequenceId &+ 1, payload: ackData) {
+                                connection.send(content: FrameEncoder.encode(ackFrame), completion: .contentProcessed { _ in
+                                    connection.cancel()
+                                })
+                            } else {
+                                connection.cancel()
+                            }
+                        }
+                    } else {
+                        connection.cancel()
+                    }
+                default:
+                    connection.cancel()
+                }
+            } else {
+                connection.cancel()
+            }
         }
     }
 
@@ -186,7 +285,7 @@ public actor PairingFeature {
                 NI_NUMERICHOST
             ) == 0 {
                 let ip = String(cString: hostname)
-                if !ip.hasPrefix("127.") {
+                if !ip.hasPrefix("127.") && !ip.hasPrefix("169.254.") {
                     return ip
                 }
             }

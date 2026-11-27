@@ -40,6 +40,7 @@ public actor TransportManager: FrameTransportSink {
     private var wifiOpener: (@Sendable () async throws -> UInt16)?
     private var wifiSender: (@Sendable (WireFrame) async throws -> Void)?
     private var wifiCloser: (@Sendable () async -> Void)?
+    private var localHostHintProvider: (@Sendable () -> String?)?
     private var outboundRecorder: (@Sendable (WireFrame, TransportChannel) async -> Void)?
 
     public init(
@@ -60,12 +61,14 @@ public actor TransportManager: FrameTransportSink {
         bleSender: (@Sendable (WireFrame) async throws -> Void)? = nil,
         wifiOpener: (@Sendable () async throws -> UInt16)? = nil,
         wifiSender: (@Sendable (WireFrame) async throws -> Void)? = nil,
-        wifiCloser: (@Sendable () async -> Void)? = nil
+        wifiCloser: (@Sendable () async -> Void)? = nil,
+        localHostHintProvider: (@Sendable () -> String?)? = nil
     ) {
         self.bleSender = bleSender
         self.wifiOpener = wifiOpener
         self.wifiSender = wifiSender
         self.wifiCloser = wifiCloser
+        self.localHostHintProvider = localHostHintProvider ?? { PairingFeature.localLanIPv4Address() }
     }
 
     public func setOutboundRecorder(_ recorder: @escaping @Sendable (WireFrame, TransportChannel) async -> Void) {
@@ -195,11 +198,12 @@ public actor TransportManager: FrameTransportSink {
                 }
                 _ = transition(.localActivityTriggered)
                 let ephemeralPort = try await opener()
+                let hints = [localHostHintProvider?(), "_andromac._tcp.local."].compactMap { $0 }
                 let wakePayload = WakeWifiPayload(
                     msgType: "WAKE_WIFI",
                     deviceId: deviceId,
                     servicePort: ephemeralPort,
-                    hostHints: ["_andromac._tcp.local."],
+                    hostHints: hints,
                     bleTokenHex: "0000000000000000",
                     reason: "high_throughput",
                     timestampMs: UInt64(Date().timeIntervalSince1970 * 1000)

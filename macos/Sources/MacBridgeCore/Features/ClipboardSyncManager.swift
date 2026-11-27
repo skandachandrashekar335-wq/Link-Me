@@ -126,7 +126,7 @@ public actor ClipboardSyncManager {
             guard pollTask == nil else { return }
             pollTask = Task { [weak self] in
                 while !Task.isCancelled {
-                    try? await Task.sleep(for: .milliseconds(500))
+                    try? await Task.sleep(for: .milliseconds(1000))
                     guard let self else { break }
                     _ = try? await self.pollLocalPasteboardOnce()
                 }

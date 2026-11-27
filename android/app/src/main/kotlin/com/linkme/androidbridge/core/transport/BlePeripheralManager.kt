@@ -190,8 +190,11 @@ class BlePeripheralManager(
     }
 
     private fun encodeOutgoingEnvelope(frame: WireFrame): ByteArray {
+        val isHandshake = frame.messageType == WireMessageType.PAIR_HELLO ||
+            frame.messageType == WireMessageType.PAIR_COMMIT ||
+            frame.messageType == WireMessageType.PAIR_ACK
         val peer = trustStore?.allPeers()?.firstOrNull()
-        if (frame.messageType != WireMessageType.PAIR_HELLO && peer != null) {
+        if (!isHandshake && peer != null) {
             runCatching {
                 return BluetoothSessionCipher(peer.bluetoothSessionKey, senderTag = "AND0").seal(frame)
             }
@@ -402,7 +405,10 @@ class BlePeripheralManager(
     }
 
     private fun handleVerifiedInbound(frame: WireFrame) {
-        if (frame.messageType != WireMessageType.PAIR_HELLO) {
+        val isHandshake = frame.messageType == WireMessageType.PAIR_HELLO ||
+            frame.messageType == WireMessageType.PAIR_COMMIT ||
+            frame.messageType == WireMessageType.PAIR_ACK
+        if (!isHandshake) {
             replayGuard.validateAndAccept(frame.sequenceId)
         }
         if (frame.messageType == WireMessageType.DEVICE_COMMAND) {

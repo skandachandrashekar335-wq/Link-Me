@@ -25,8 +25,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -50,6 +48,7 @@ import com.linkme.androidbridge.service.BridgeActivityHub
 import com.linkme.androidbridge.service.BridgeForegroundService
 import com.linkme.androidbridge.service.NotificationAddonStatus
 import com.linkme.androidbridge.service.NotificationCompanionBridge
+import com.linkme.androidbridge.service.TelemetryFeature
 import com.linkme.androidbridge.ui.theme.AndroidBridgeTheme
 import com.linkme.androidbridge.ui.theme.paletteForTheme
 import kotlinx.coroutines.Dispatchers
@@ -60,14 +59,14 @@ import kotlinx.coroutines.withContext
  * ANR-free Compose Studio entrypoint: zero blocking Keystore/crypto/disk I/O on Main Thread.
  */
 class MainActivity : ComponentActivity() {
-    private val sharedUris = mutableStateListOf<Uri>()
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         ingestIntent(intent)
 
         val prefsStore = BridgePreferencesStore.forContext(applicationContext)
+        val initialBattery = TelemetryFeature("local").readCurrentBattery(applicationContext)
+        BridgeActivityHub.updateLocalBattery(initialBattery.level, initialBattery.isCharging)
 
         setContent {
             val prefsState by prefsStore.state.collectAsState()
@@ -90,15 +89,20 @@ class MainActivity : ComponentActivity() {
                 var notificationMirrorEnabled by remember { mutableStateOf(true) }
                 var addonStatus by remember { mutableStateOf(NotificationAddonStatus.NOT_INSTALLED) }
                 var permissionsGranted by remember { mutableStateOf(hasRequiredPermissions()) }
-                var batteryPercent by remember { mutableIntStateOf(100) }
-                var isCharging by remember { mutableStateOf(false) }
 
                 val liveNotifications by NotificationCompanionBridge.recentFeed.collectAsState()
                 val activities by BridgeActivityHub.activities.collectAsState()
                 val pendingOffer by BridgeActivityHub.pendingFileOffer.collectAsState()
+                val activeFileTransfer by BridgeActivityHub.activeFileTransfer.collectAsState()
                 val isBluetoothConnected by BridgeActivityHub.bluetoothConnected.collectAsState()
                 val isWifiActive by BridgeActivityHub.wifiConnected.collectAsState()
                 val latencyMs by BridgeActivityHub.latencyMs.collectAsState()
+                val localBatteryPercent by BridgeActivityHub.localBatteryPercent.collectAsState()
+                val localIsCharging by BridgeActivityHub.localIsCharging.collectAsState()
+                val peerDeviceName by BridgeActivityHub.peerDeviceName.collectAsState()
+                val peerBatteryPercent by BridgeActivityHub.peerBatteryPercent.collectAsState()
+                val peerIsCharging by BridgeActivityHub.peerIsCharging.collectAsState()
+                val mirrorState by BridgeActivityHub.mirrorState.collectAsState()
 
                 DisposableEffect(lifecycleOwner) {
                     val observer = LifecycleEventObserver { _, event ->
@@ -148,31 +152,35 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val filePickerLauncher = rememberLauncherForActivityResult(
-                    ActivityResultContracts.OpenDocument()
-                ) { uri ->
-                    if (uri != null) {
-                        sharedUris.add(uri)
+                    ActivityResultContracts.OpenMultipleDocuments()
+                ) { uris ->
+                    if (uris.isNotEmpty()) {
                         currentState = stateMachine.handle(BatteryStateEvent.LOCAL_ACTIVITY_TRIGGERED)
-                        BridgeActivityHub.onSendFileUri?.invoke(uri.toString())
+                        uris.forEach { uri ->
+                            BridgeActivityHub.enqueueOutboundFileUri(uri.toString())
+                        }
                     }
                 }
 
                 BridgeHomeScreen(
                     bridgeState = currentState,
-                    peerName = pairedPeerName,
+                    peerName = peerDeviceName ?: pairedPeerName,
                     peerCertFingerprint = pairedPeerFingerprint,
                     isPaired = isPaired,
                     isBluetoothConnected = isBluetoothConnected,
                     isWifiActive = isWifiActive,
-                    batteryPercent = batteryPercent,
-                    isCharging = isCharging,
+                    batteryPercent = localBatteryPercent ?: initialBattery.level,
+                    isCharging = localIsCharging,
+                    peerBatteryPercent = peerBatteryPercent,
+                    peerIsCharging = peerIsCharging,
                     clipboardSyncEnabled = clipboardSyncEnabled,
                     notificationMirrorEnabled = notificationMirrorEnabled,
                     addonStatus = addonStatus,
                     prefsState = prefsState,
                     latencyMs = latencyMs,
-                    queuedShareCount = sharedUris.size,
+                    activeFileTransfer = activeFileTransfer,
                     pendingFileOffer = pendingOffer,
+                    mirrorState = mirrorState,
                     notifications = liveNotifications,
                     activities = activities,
                     onToggleClipboardSync = { clipboardSyncEnabled = it },
@@ -342,8 +350,8 @@ class MainActivity : ComponentActivity() {
                             Text(
                                 "AndroidBridge keeps Notification Listener permission out of the main APK so Play Protect installs cleanly.\n\n" +
                                     "To enable notification mirroring:\n" +
-                                    "1. Install AndroidBridge-NotifyAddon-v1.0.0.apk from GitHub Releases\n" +
-                                    "2. Or run: adb install -r AndroidBridge-NotifyAddon-v1.0.0.apk\n" +
+                                    "1. Install AndroidBridge-NotifyAddon-v1.1.0.apk from GitHub Releases\n" +
+                                    "2. Or run: adb install -r AndroidBridge-NotifyAddon-v1.1.0.apk\n" +
                                     "3. Grant Notification Access to Link-Me Notify Add-on.",
                                 fontSize = 13.sp,
                                 fontFamily = FontFamily.Default
@@ -357,7 +365,7 @@ class MainActivity : ComponentActivity() {
                                         startActivity(
                                             Intent(
                                                 Intent.ACTION_VIEW,
-                                                Uri.parse("https://github.com/skandachandrashekar335-wq/Link-Me/releases/tag/v1.0.0")
+                                                Uri.parse("https://github.com/skandachandrashekar335-wq/Link-Me/releases/tag/v1.1.0")
                                             )
                                         )
                                     }
@@ -391,8 +399,7 @@ class MainActivity : ComponentActivity() {
                 intent.getParcelableArrayListExtra(ShareReceiverActivity.EXTRA_SHARED_URIS)
             }
             if (!forwarded.isNullOrEmpty()) {
-                sharedUris.addAll(forwarded)
-                forwarded.forEach { BridgeActivityHub.onSendFileUri?.invoke(it.toString()) }
+                forwarded.forEach { BridgeActivityHub.enqueueOutboundFileUri(it.toString()) }
             }
         }
     }

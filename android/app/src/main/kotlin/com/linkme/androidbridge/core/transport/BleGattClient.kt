@@ -30,6 +30,9 @@ import java.io.DataOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -53,6 +56,8 @@ class BleGattClient(
     private val replayGuard = ReplayGuard()
     private val packetSeq = AtomicLong(1L)
     private val json = Json { ignoreUnknownKeys = true }
+    private val pendingHandshakeQueue = ConcurrentLinkedQueue<WireFrame>()
+    private val ackWaiters = ConcurrentHashMap<Long, CountDownLatch>()
 
     private var scanCallback: ScanCallback? = null
     private var gatt: BluetoothGatt? = null
@@ -67,20 +72,19 @@ class BleGattClient(
     private var negotiatedMtu: Int = 23
 
     @Volatile
-    private var pendingHandshakeFrame: WireFrame? = null
-
-    @Volatile
     var isConnected: Boolean = false
         private set
 
     @SuppressLint("MissingPermission")
-    fun sendPairingHelloOverBle(pairHelloFrame: WireFrame) {
-        pendingHandshakeFrame = pairHelloFrame
+    fun sendPairingHelloOverBle(pairHelloFrame: WireFrame) = sendPairingFrameOverBle(pairHelloFrame)
+
+    @SuppressLint("MissingPermission")
+    fun sendPairingFrameOverBle(frame: WireFrame) {
         if (isConnected && rxWriteChar != null) {
-            flushPendingHandshake()
-        } else {
-            startScanning(autoReconnect = false)
+            if (sendFrame(frame)) return
         }
+        pendingHandshakeQueue.offer(frame)
+        startScanning(autoReconnect = false)
     }
 
     @SuppressLint("MissingPermission")
@@ -122,8 +126,11 @@ class BleGattClient(
     }
 
     fun sendFrame(frame: WireFrame): Boolean {
+        val isHandshake = frame.messageType == WireMessageType.PAIR_HELLO ||
+            frame.messageType == WireMessageType.PAIR_COMMIT ||
+            frame.messageType == WireMessageType.PAIR_ACK
         val activePeer = trustStore.allPeers().firstOrNull()
-        val envelope = if (frame.messageType != WireMessageType.PAIR_HELLO && activePeer != null) {
+        val envelope = if (!isHandshake && activePeer != null) {
             runCatching {
                 BluetoothSessionCipher(activePeer.bluetoothSessionKey, senderTag = "AND0").seal(frame)
             }.getOrElse { FrameEncoder.encode(frame) }
@@ -148,8 +155,18 @@ class BleGattClient(
         val client = gatt ?: return false
         val char = rxWriteChar ?: return false
         val pid = packetSeq.getAndIncrement()
-        for (pkt in BluetoothPacketCodec.packetize(envelope, pid, negotiatedMtu)) {
-            writeCharacteristicBytes(client, char, pkt)
+        val packets = BluetoothPacketCodec.packetize(envelope, pid, negotiatedMtu)
+        val latch = if (packets.size > 1) CountDownLatch(1).also { ackWaiters[pid] = it } else null
+        for ((index, pkt) in packets.withIndex()) {
+            val withResponse = packets.size > 2 && (index % 8 == 7 || index == packets.lastIndex)
+            writeCharacteristicBytes(client, char, pkt, withResponse = withResponse)
+            if (packets.size > 1) {
+                runCatching { Thread.sleep(6L) }
+            }
+        }
+        latch?.let {
+            runCatching { it.await(1500L, TimeUnit.MILLISECONDS) }
+            ackWaiters.remove(pid)
         }
         return true
     }
@@ -158,9 +175,14 @@ class BleGattClient(
     private fun writeCharacteristicBytes(
         client: BluetoothGatt,
         char: BluetoothGattCharacteristic,
-        data: ByteArray
+        data: ByteArray,
+        withResponse: Boolean = false
     ) {
-        val writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        val writeType = if (withResponse) {
+            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        } else {
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             client.writeCharacteristic(char, data, writeType)
         } else {
@@ -174,9 +196,13 @@ class BleGattClient(
     }
 
     private fun flushPendingHandshake() {
-        val frame = pendingHandshakeFrame ?: return
-        if (sendFrame(frame)) {
-            pendingHandshakeFrame = null
+        while (true) {
+            val next = pendingHandshakeQueue.peek() ?: break
+            if (sendFrame(next)) {
+                pendingHandshakeQueue.poll()
+            } else {
+                break
+            }
         }
     }
 
@@ -307,7 +333,13 @@ class BleGattClient(
         }
 
         private fun handleNotifyValue(value: ByteArray) {
-            if (value.isEmpty() || value[0] == BluetoothPacketCodec.ACK_TAG) return
+            if (value.isEmpty()) return
+            if (value[0] == BluetoothPacketCodec.ACK_TAG) {
+                BluetoothPacketCodec.AckPacket.decode(value)?.let { ack ->
+                    ackWaiters[ack.packetId]?.countDown()
+                }
+                return
+            }
             if (value[0] == BluetoothPacketCodec.DATA_TAG) {
                 val res = reassembler.ingest(value)
                 res.completeEnvelope?.let { decodeAndDeliver(it) }
@@ -326,7 +358,10 @@ class BleGattClient(
             runCatching { WireFrame.decode(envelope) }.getOrNull()
         } ?: return
 
-        if (frame.messageType != WireMessageType.PAIR_HELLO) {
+        val isHandshake = frame.messageType == WireMessageType.PAIR_HELLO ||
+            frame.messageType == WireMessageType.PAIR_COMMIT ||
+            frame.messageType == WireMessageType.PAIR_ACK
+        if (!isHandshake) {
             replayGuard.validateAndAccept(frame.sequenceId)
         }
 

@@ -6,6 +6,20 @@ import UserNotifications
 @MainActor
 final class MacBridgeAppDelegate: NSObject, NSApplicationDelegate {
     var onWillTerminate: (() -> Void)?
+    var onReopenMainWindow: (() -> Void)?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            onReopenMainWindow?()
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        return true
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
         onWillTerminate?()
@@ -16,25 +30,30 @@ final class MacBridgeAppDelegate: NSObject, NSApplicationDelegate {
 struct MacBridgeApp: App {
     @NSApplicationDelegateAdaptor(MacBridgeAppDelegate.self) private var appDelegate
     @StateObject private var viewModel = BridgeDashboardViewModel()
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
-        MenuBarExtra {
-            MenuBarDashboardView(viewModel: viewModel)
+        Window("Link-Me Studio", id: "studio") {
+            BridgeStudioWindow(viewModel: viewModel)
                 .onAppear {
                     let vm = viewModel
                     appDelegate.onWillTerminate = { [weak vm] in
                         vm?.teardownOnQuit()
                     }
+                    appDelegate.onReopenMainWindow = {
+                        openWindow(id: "studio")
+                    }
+                    NSApp.activate(ignoringOtherApps: true)
                 }
+        }
+        .defaultSize(width: 920, height: 640)
+
+        MenuBarExtra {
+            MenuBarDashboardView(viewModel: viewModel)
         } label: {
             Image(nsImage: MenuBarVectorIcon.makeTemplateImage(isActive: viewModel.isBluetoothConnected || viewModel.bridgeState == .activeWifiStream))
         }
         .menuBarExtraStyle(.window)
-
-        Window("Link-Me Studio", id: "studio") {
-            BridgeStudioWindow(viewModel: viewModel)
-        }
-        .defaultSize(width: 1040, height: 700)
     }
 }
 
@@ -63,6 +82,7 @@ enum MenuBarVectorIcon {
 enum StudioTab: String, CaseIterable {
     case bridge = "Bridge"
     case pairing = "Secure Pairing"
+    case screenMirror = "Screen Mirror"
     case activity = "Activity"
     case customize = "Customize"
     case diagnostics = "Diagnostics"
@@ -126,9 +146,19 @@ final class BridgeDashboardViewModel: ObservableObject {
     @Published var peerName: String = "No Device Paired"
     @Published var peerDeviceId: String = ""
     @Published var peerCertFingerprint: String = ""
-    @Published var peerBatteryPercent: Int = 84
-    @Published var peerIsCharging: Bool = true
+    @Published var peerBatteryPercent: Int? = nil
+    @Published var peerIsCharging: Bool = false
+    @Published var localBatteryPercent: Int = MacBatteryMonitor.readBattery().level
+    @Published var localIsCharging: Bool = MacBatteryMonitor.readBattery().isCharging
     @Published var peerPaired: Bool = false
+
+    // Live Screen Mirroring state (0x0C / 0x0D)
+    @Published var isViewingRemoteScreen: Bool = false
+    @Published var isSharingLocalScreen: Bool = false
+    @Published var remoteScreenImage: NSImage?
+    @Published var remoteScreenSizeText: String = ""
+    @Published var remoteMirrorFps: Int = 0
+    @Published var mirrorStatusText: String = "Standby"
     @Published var isBluetoothConnected: Bool = false
     @Published var latencyMs: Int?
     @Published var clipboardSyncEnabled: Bool = true
@@ -165,6 +195,7 @@ final class BridgeDashboardViewModel: ObservableObject {
     lazy var notificationManager = MacNotificationManager(transport: transportManager)
     lazy var telemetryFeature = TelemetryFeature(transport: transportManager)
     lazy var continuityController = MacContinuityController(transport: transportManager)
+    let screenMirrorManager = ScreenMirrorManager()
 
     private var localDeviceId: String = "11111111-1111-4111-8111-111111111111"
     private var localIdentity: DeviceIdentity?
@@ -173,7 +204,18 @@ final class BridgeDashboardViewModel: ObservableObject {
     private var wifiTlsServer: WifiTlsServer?
     private var wifiTlsClient: WifiTlsClient?
     private var activeTransferId: UUID?
+    private var telemetryLoopTask: Task<Void, Never>?
+    private var mirrorFpsWindowStart: Date = Date()
+    private var mirrorFrameCounter: Int = 0
     private var isBootstrapped = false
+
+    var peerBatteryLabel: String {
+        peerBatteryPercent.map { "\($0)%" } ?? "--"
+    }
+
+    var peerBatteryFraction: CGFloat {
+        CGFloat(max(0, min(100, peerBatteryPercent ?? 0))) / 100.0
+    }
 
     var palette: StudioThemePalette {
         StudioThemePalette.from(preferences.paletteSpec)
@@ -241,6 +283,10 @@ final class BridgeDashboardViewModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.isBluetoothConnected = connected || (self.peripheralDiagnostics.subscribedCentralsCount > 0)
+                await self.clipboardManager.setPeerReachable(self.isBluetoothConnected || self.peerPaired)
+                if connected {
+                    await self.emitLocalTelemetryOnce()
+                }
             }
         }
         central.onLatencyMeasured = { [weak self] rtt in
@@ -257,8 +303,13 @@ final class BridgeDashboardViewModel: ObservableObject {
         peripheral.onDiagnosticsChanged = { [weak self] diag in
             Task { @MainActor in
                 guard let self else { return }
+                let hadSubscribers = self.peripheralDiagnostics.subscribedCentralsCount > 0
                 self.peripheralDiagnostics = diag
                 self.isBluetoothConnected = (diag.subscribedCentralsCount > 0) || (self.bleCentralManager?.isConnected == true)
+                await self.clipboardManager.setPeerReachable(self.isBluetoothConnected || self.peerPaired)
+                if !hadSubscribers && diag.subscribedCentralsCount > 0 && self.peerPaired {
+                    await self.emitLocalTelemetryOnce()
+                }
             }
         }
         peripheral.onInboundFrame = { [weak self] frame in
@@ -285,6 +336,7 @@ final class BridgeDashboardViewModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             await self.applyPreferencesSnapshot(self.preferences.snapshot)
+            await self.clipboardManager.setPeerReachable(self.peerPaired)
             try? await self.pairingFeature.startTemporaryListener(
                 onReadyPort: { [weak self] port in
                     Task { @MainActor in
@@ -295,9 +347,14 @@ final class BridgeDashboardViewModel: ObservableObject {
                     Task { @MainActor [weak self] in
                         await self?.processIncomingPairHello(hello)
                     }
+                },
+                onPairCommitReceived: { [weak self] commit in
+                    guard let self else { return nil }
+                    return await self.confirmPeerFromCommit(commit)
                 }
             )
             await self.refreshPairingSession()
+            self.startTelemetryTimer()
 
             await self.transportManager.configureTransportHooks(
                 bleSender: { [weak central, weak peripheral] frame in
@@ -317,6 +374,9 @@ final class BridgeDashboardViewModel: ObservableObject {
                 },
                 wifiCloser: { [weak self] in
                     await self?.closeWifiTransport()
+                },
+                localHostHintProvider: {
+                    PairingFeature.localLanIPv4Address()
                 }
             )
         }
@@ -336,6 +396,9 @@ final class BridgeDashboardViewModel: ObservableObject {
     }
 
     func teardownOnQuit() {
+        telemetryLoopTask?.cancel()
+        telemetryLoopTask = nil
+        Task { await screenMirrorManager.stopSharing() }
         bleCentralManager?.stopScanning()
         blePeripheralManager?.stop()
         wifiTlsClient?.close()
@@ -345,6 +408,158 @@ final class BridgeDashboardViewModel: ObservableObject {
         Task {
             await clipboardManager.setPeerReachable(false)
         }
+    }
+
+    private func startTelemetryTimer() {
+        telemetryLoopTask?.cancel()
+        telemetryLoopTask = Task { [weak self] in
+            while !Task.isCancelled {
+                if let self, self.peerPaired {
+                    await self.emitLocalTelemetryOnce()
+                }
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
+    }
+
+    private func emitLocalTelemetryOnce() async {
+        let reading = MacBatteryMonitor.readBattery()
+        localBatteryPercent = reading.level
+        localIsCharging = reading.isCharging
+        guard peerPaired else { return }
+        let state = await transportManager.bridgeState
+        _ = try? await telemetryFeature.emitLocalTelemetry(deviceId: localDeviceId, bridgeState: state)
+    }
+
+    private func confirmPeerFromCommit(_ commit: PairCommitPayload) async -> PairAckPayload? {
+        guard let result = try? await pairingFeature.handleIncomingPairCommit(commit) else {
+            return nil
+        }
+        peerPaired = true
+        peerName = result.peer.deviceName
+        peerDeviceId = result.peer.deviceId
+        peerCertFingerprint = result.peer.pinnedCertSha256
+        peerBatteryPercent = commit.batteryLevel
+        peerIsCharging = commit.isCharging
+        isShowingPairingSheet = false
+        pendingApproval = nil
+        bleCentralManager?.startScanning()
+        await clipboardManager.setPeerReachable(true)
+        statusBanner = "Paired with \(result.peer.deviceName) • \(commit.batteryLevel)%"
+        appendActivity(
+            BridgeActivityRecord(
+                category: .system,
+                title: "Device Paired (PAIR_COMMIT)",
+                detail: "\(result.peer.deviceName) • \(commit.batteryLevel)%",
+                badgeText: "Verified"
+            )
+        )
+        return result.ack
+    }
+
+    private func sendPairAckOverActiveLinks(_ ack: PairAckPayload) {
+        guard let ackData = try? JSONEncoder().encode(ack),
+              let ackFrame = try? WireFrame(
+                messageType: .pairAck,
+                sequenceId: UInt64(Date().timeIntervalSince1970 * 1000),
+                payload: ackData
+              ) else {
+            return
+        }
+        blePeripheralManager?.sendFrame(ackFrame)
+        bleCentralManager?.sendControlFrame(ackFrame)
+        Task {
+            try? await transportManager.sendResilientFrame(ackFrame, preferBle: true)
+        }
+    }
+
+    private func postFileSavedNotification(filename: String, fileURL: URL?) {
+        let content = UNMutableNotificationContent()
+        content.title = "File Received from \(peerName)"
+        content.body = "\(filename) saved to ~/Downloads/Link-Me"
+        content.sound = .default
+        if let fileURL {
+            content.userInfo = ["filePath": fileURL.path]
+        }
+        let req = UNNotificationRequest(
+            identifier: "linkme-file-\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(req)
+    }
+
+    func toggleViewingPhoneScreen() {
+        let nextStart = !isViewingRemoteScreen
+        isViewingRemoteScreen = nextStart
+        mirrorStatusText = nextStart ? "Requesting \(peerName) screen..." : "Standby"
+        if !nextStart {
+            remoteScreenImage = nil
+            remoteMirrorFps = 0
+        }
+        let fps = bridgeState == .activeWifiStream ? 15 : 3
+        let ctrl = ScreenControlPayload(action: nextStart ? "start" : "stop", source: "android", fps: fps, quality: 55)
+        Task {
+            if let data = try? JSONEncoder().encode(ctrl),
+               let frame = try? await transportManager.makeFrame(messageType: .screenControl, payload: data) {
+                try? await transportManager.sendResilientFrame(frame, preferBle: true)
+            }
+        }
+    }
+
+    func toggleSharingMacScreen() {
+        if isSharingLocalScreen {
+            Task { await stopSharingMacScreen() }
+        } else {
+            let fps = bridgeState == .activeWifiStream ? 15 : 3
+            Task { await startSharingMacScreen(fps: fps, quality: 55) }
+        }
+    }
+
+    private func startSharingMacScreen(fps: Int, quality: Int) async {
+        let bleOnly = bridgeState != .activeWifiStream
+        isSharingLocalScreen = true
+        mirrorStatusText = "Starting macOS display capture..."
+        do {
+            try await screenMirrorManager.startSharing(
+                fps: fps,
+                qualityPercent: quality,
+                overBleOnly: bleOnly,
+                onFrame: { [weak self] packet in
+                    guard let self else { return }
+                    Task {
+                        if let frame = try? await self.transportManager.makeFrame(
+                            messageType: .screenFrame,
+                            payload: packet.encode()
+                        ) {
+                            try? await self.transportManager.sendResilientFrame(frame, preferBle: false)
+                        }
+                    }
+                },
+                onStatus: { [weak self] status in
+                    Task { @MainActor [weak self] in
+                        self?.mirrorStatusText = status
+                    }
+                }
+            )
+            appendActivity(
+                BridgeActivityRecord(
+                    category: .system,
+                    title: "Screen Mirroring Started",
+                    detail: "Streaming macOS screen to \(peerName)",
+                    badgeText: "Live"
+                )
+            )
+        } catch {
+            isSharingLocalScreen = false
+            mirrorStatusText = "Screen Recording permission required: \(error.localizedDescription)"
+        }
+    }
+
+    private func stopSharingMacScreen() async {
+        await screenMirrorManager.stopSharing()
+        isSharingLocalScreen = false
+        mirrorStatusText = "Standby"
     }
 
     private func openOrStartWifiServer() async throws -> UInt16 {
@@ -417,6 +632,24 @@ final class BridgeDashboardViewModel: ObservableObject {
                 await processIncomingPairHello(hello)
             }
 
+        case .pairCommit:
+            if let commit = try? JSONDecoder().decode(PairCommitPayload.self, from: frame.payload),
+               let ack = await confirmPeerFromCommit(commit) {
+                sendPairAckOverActiveLinks(ack)
+                await emitLocalTelemetryOnce()
+            }
+
+        case .pairAck:
+            if let ack = try? JSONDecoder().decode(PairAckPayload.self, from: frame.payload) {
+                peerPaired = true
+                peerName = ack.deviceName
+                peerDeviceId = ack.deviceId
+                peerCertFingerprint = ack.spkiSha256
+                peerBatteryPercent = ack.batteryLevel
+                peerIsCharging = ack.isCharging
+                await clipboardManager.setPeerReachable(true)
+            }
+
         case .wakeWifi:
             if let wake = try? JSONDecoder().decode(WakeWifiPayload.self, from: frame.payload),
                let identity = localIdentity,
@@ -473,7 +706,8 @@ final class BridgeDashboardViewModel: ObservableObject {
                 if progress.bytesTransferred >= progress.totalBytes {
                     let savedURL = try? await fileTransferManager.finalizeIncomingTransfer(packet.transferId)
                     activeTransfer = nil
-                    statusBanner = "Saved \(progress.filename)"
+                    statusBanner = "Saved \(progress.filename) to ~/Downloads/Link-Me"
+                    postFileSavedNotification(filename: progress.filename, fileURL: savedURL)
                     appendActivity(
                         BridgeActivityRecord(
                             category: .files,
@@ -546,6 +780,32 @@ final class BridgeDashboardViewModel: ObservableObject {
                         badgeText: "Opened"
                     )
                 )
+            }
+
+        case .screenControl:
+            if let control = try? JSONDecoder().decode(ScreenControlPayload.self, from: frame.payload),
+               control.source == "macos" {
+                if control.action == "start" {
+                    await startSharingMacScreen(fps: control.fps, quality: control.quality)
+                } else {
+                    await stopSharingMacScreen()
+                }
+            }
+
+        case .screenFrame:
+            if let packet = try? ScreenFramePacket.decode(from: frame.payload),
+               let img = NSImage(data: packet.jpegData) {
+                remoteScreenImage = img
+                remoteScreenSizeText = "\(packet.width)×\(packet.height)"
+                mirrorFrameCounter += 1
+                let now = Date()
+                let elapsed = now.timeIntervalSince(mirrorFpsWindowStart)
+                if elapsed >= 1.0 {
+                    remoteMirrorFps = max(1, Int((Double(mirrorFrameCounter) / elapsed).rounded()))
+                    mirrorFrameCounter = 0
+                    mirrorFpsWindowStart = now
+                }
+                mirrorStatusText = "Live Mirror • \(packet.width)×\(packet.height)"
             }
 
         default:
@@ -782,6 +1042,11 @@ final class BridgeDashboardViewModel: ObservableObject {
                 peerDeviceId = peer.deviceId
                 peerCertFingerprint = peer.pinnedCertSha256
                 bleCentralManager?.startScanning()
+                await clipboardManager.setPeerReachable(true)
+                if let ack = try? await pairingFeature.buildPairAck(deviceName: preferences.normalizedAlias) {
+                    sendPairAckOverActiveLinks(ack)
+                }
+                await emitLocalTelemetryOnce()
                 statusBanner = "Trusted \(peer.deviceName) in Keychain"
                 appendActivity(
                     BridgeActivityRecord(

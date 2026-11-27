@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bolt
+import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.FolderOpen
@@ -46,6 +47,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -84,7 +86,9 @@ import com.linkme.androidbridge.core.protocol.MediaControlAction
 import com.linkme.androidbridge.core.protocol.NotificationEventPayload
 import com.linkme.androidbridge.service.ActivityCategory
 import com.linkme.androidbridge.service.BridgeActivityItem
+import com.linkme.androidbridge.service.FileTransferUiState
 import com.linkme.androidbridge.service.NotificationAddonStatus
+import com.linkme.androidbridge.service.ScreenMirrorUiState
 import com.linkme.androidbridge.ui.theme.BridgeThemePalette
 import com.linkme.androidbridge.ui.theme.LocalBridgePalette
 import com.linkme.androidbridge.ui.theme.paletteForTheme
@@ -92,6 +96,7 @@ import kotlin.math.roundToInt
 
 enum class AndroidStudioTab(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Rounded.Home),
+    MIRROR("Mirror", Icons.Rounded.Cast),
     SCAN_QR("Scan QR", Icons.Rounded.QrCodeScanner),
     ACTIVITY("Activity", Icons.Rounded.History),
     SETTINGS("Settings", Icons.Rounded.Settings)
@@ -107,13 +112,16 @@ fun BridgeHomeScreen(
     isWifiActive: Boolean,
     batteryPercent: Int,
     isCharging: Boolean,
+    peerBatteryPercent: Int?,
+    peerIsCharging: Boolean,
     clipboardSyncEnabled: Boolean,
     notificationMirrorEnabled: Boolean,
     addonStatus: NotificationAddonStatus,
     prefsState: BridgePreferencesState,
     latencyMs: Int?,
-    queuedShareCount: Int,
+    activeFileTransfer: FileTransferUiState?,
     pendingFileOffer: FileOfferPayload?,
+    mirrorState: ScreenMirrorUiState,
     notifications: List<NotificationEventPayload>,
     activities: List<BridgeActivityItem>,
     onToggleClipboardSync: (Boolean) -> Unit,
@@ -299,6 +307,15 @@ fun BridgeHomeScreen(
                     }
                 }
 
+                AndroidStudioTab.MIRROR -> {
+                    ScreenMirrorScreen(
+                        peerName = peerName,
+                        isPaired = isPaired,
+                        isWifiActive = isWifiActive || bridgeState == BridgeState.ACTIVE_WIFI_STREAM,
+                        mirrorState = mirrorState
+                    )
+                }
+
                 AndroidStudioTab.HOME -> {
                     Column(
                         modifier = Modifier
@@ -316,10 +333,12 @@ fun BridgeHomeScreen(
                             isWifiActive = isWifiActive,
                             batteryPercent = batteryPercent,
                             isCharging = isCharging,
+                            peerBatteryPercent = peerBatteryPercent,
+                            peerIsCharging = peerIsCharging,
                             addonStatus = addonStatus,
                             prefsState = prefsState,
                             latencyMs = latencyMs,
-                            queuedShareCount = queuedShareCount,
+                            activeFileTransfer = activeFileTransfer,
                             pendingFileOffer = pendingFileOffer,
                             notifications = notifications,
                             onOpenQrTab = { currentTab = AndroidStudioTab.SCAN_QR },
@@ -404,10 +423,12 @@ private fun HomeTabContent(
     isWifiActive: Boolean,
     batteryPercent: Int,
     isCharging: Boolean,
+    peerBatteryPercent: Int?,
+    peerIsCharging: Boolean,
     addonStatus: NotificationAddonStatus,
     prefsState: BridgePreferencesState,
     latencyMs: Int?,
-    queuedShareCount: Int,
+    activeFileTransfer: FileTransferUiState?,
     pendingFileOffer: FileOfferPayload?,
     notifications: List<NotificationEventPayload>,
     onOpenQrTab: () -> Unit,
@@ -503,8 +524,9 @@ private fun HomeTabContent(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                val macBattLabel = peerBatteryPercent?.let { "$it%${if (peerIsCharging) "+" else ""}" } ?: "--"
                 Text(
-                    text = "$batteryPercent% ${if (isCharging) "Charging" else "Battery"}",
+                    text = "Phone $batteryPercent%${if (isCharging) "+" else ""} • Mac $macBattLabel",
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                     color = pal.secondaryText
@@ -620,40 +642,56 @@ private fun HomeTabContent(
         }
     }
 
-    // 4. File Transfer Card
+    // 4. File Transfer Card (Live 0% -> 100% progress, zero stuck queue items)
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = pal.surfaceContainer),
         border = BorderStroke(1.dp, pal.outlineVariant)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.weight(1f)) {
-                Box(
-                    modifier = Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).background(pal.surfaceHigh),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(Icons.Rounded.FolderOpen, contentDescription = null, tint = pal.activeCardLight, modifier = Modifier.size(18.dp))
+        Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.weight(1f)) {
+                    Box(
+                        modifier = Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).background(pal.surfaceHigh),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Rounded.FolderOpen, contentDescription = null, tint = pal.activeCardLight, modifier = Modifier.size(18.dp))
+                    }
+                    Column {
+                        Text("File Transfer", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = pal.onSurface)
+                        Text(
+                            if (activeFileTransfer != null) {
+                                "${activeFileTransfer.filename} • ${activeFileTransfer.percent}% (${activeFileTransfer.transportLabel})"
+                            } else {
+                                "Saved to Downloads/Link-Me • Up to 4.0 GB P2P"
+                            },
+                            fontSize = 11.sp,
+                            color = pal.secondaryText,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
-                Column {
-                    Text("File Transfer", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = pal.onSurface)
-                    Text(
-                        if (queuedShareCount > 0) "$queuedShareCount queued • BLE E2EE / Wi-Fi Turbo" else "Stream up to 4.0 GB P2P",
-                        fontSize = 11.sp,
-                        color = pal.secondaryText
-                    )
+                Button(
+                    onClick = onSendFileClick,
+                    shape = CircleShape,
+                    colors = ButtonDefaults.buttonColors(containerColor = pal.activeCardLight)
+                ) {
+                    Text("+ Send", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = pal.activeCardInk)
                 }
             }
-            Button(
-                onClick = onSendFileClick,
-                shape = CircleShape,
-                colors = ButtonDefaults.buttonColors(containerColor = pal.activeCardLight)
-            ) {
-                Text("+ Send", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = pal.activeCardInk)
+            if (activeFileTransfer != null) {
+                LinearProgressIndicator(
+                    progress = { activeFileTransfer.fraction },
+                    modifier = Modifier.fillMaxWidth().height(5.dp).clip(CircleShape),
+                    color = pal.primaryAccent,
+                    trackColor = pal.surfaceHighest
+                )
             }
         }
     }

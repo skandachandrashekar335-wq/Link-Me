@@ -354,4 +354,80 @@ struct TransportAndLoopbackTests {
         #expect(await log.bleFrames.count == 1)
         #expect(await log.bleFrames.first?.sequenceId == 77)
     }
+
+    @Test("Bidirectional PAIR_COMMIT + PAIR_ACK updates TrustStore with real battery telemetry and Screen Mirror frames round-trip")
+    func bidirectionalPairCommitAndScreenMirrorLoopback() async throws {
+        let macStore = InMemorySecureStore()
+        let macIdentityMgr = IdentityManager(store: macStore)
+        let _ = try macIdentityMgr.loadOrCreateIdentity(deviceId: "11111111-1111-4111-8111-111111111111")
+        let macTrust = TrustStore(store: macStore)
+
+        let androidStore = InMemorySecureStore()
+        let androidIdentity = try IdentityManager(store: androidStore)
+            .loadOrCreateIdentity(deviceId: "22222222-2222-4222-8222-222222222222")
+
+        let pairingFeature = PairingFeature(identityManager: macIdentityMgr, trustStore: macTrust)
+        let (uriPayload, _) = try await pairingFeature.beginPairingSession(tcpPort: 49152, deviceName: "Skanda MacBook Pro")
+        let parsed = try PairingUriPayload.parse(uriPayload.uriString)
+        let nonceData = try #require(Data(hexString: parsed.nonceHex))
+
+        let androidCrypto = PairingCrypto()
+        let derived = try androidCrypto.deriveSecrets(peerPublicKeyString: parsed.publicKeyBase64Url, nonce: nonceData)
+        let sasMacHex = PairingCommitMac.computeHex(
+            sharedBleSecret: derived.sharedBleSecret,
+            deviceId: androidIdentity.deviceId,
+            spkiSha256: androidIdentity.certificateSha256Hex,
+            ephemeralPublicKey: androidCrypto.publicKeyBase64Url
+        )
+
+        // Forged PAIR_COMMIT with invalid HMAC must be rejected
+        let badCommit = PairCommitPayload(
+            deviceId: androidIdentity.deviceId,
+            deviceName: "Samsung SM-A736B",
+            ephemeralPublicKey: androidCrypto.publicKeyBase64Url,
+            spkiSha256: androidIdentity.certificateSha256Hex,
+            sasMacHex: String(repeating: "0", count: 64),
+            batteryLevel: 76,
+            isCharging: true
+        )
+        await #expect(throws: (any Error).self) {
+            _ = try await pairingFeature.handleIncomingPairCommit(badCommit)
+        }
+
+        // Authentic PAIR_COMMIT persists TrustStore and returns real Mac battery telemetry in PAIR_ACK
+        let validCommit = PairCommitPayload(
+            deviceId: androidIdentity.deviceId,
+            deviceName: "Samsung SM-A736B",
+            ephemeralPublicKey: androidCrypto.publicKeyBase64Url,
+            spkiSha256: androidIdentity.certificateSha256Hex,
+            sasMacHex: sasMacHex,
+            batteryLevel: 76,
+            isCharging: true
+        )
+        let (savedPeer, ack) = try await pairingFeature.handleIncomingPairCommit(validCommit)
+        #expect(savedPeer.deviceName == "Samsung SM-A736B")
+        #expect(try macTrust.peer(forDeviceId: androidIdentity.deviceId)?.bluetoothSessionKey == derived.sessionKey)
+        #expect(ack.accepted == true)
+        #expect((0...100).contains(ack.batteryLevel))
+        #expect((0...100).contains(MacBatteryMonitor.readBattery().level))
+
+        // Screen Mirroring 0x0D SCREEN_CONTROL + 0x0C SCREEN_FRAME round-trip over encrypted Bluetooth cipher
+        let cipherMac = try BluetoothSessionCipher(sessionKey: derived.sessionKey, senderTag: "MAC0")
+        let cipherAndroid = try BluetoothSessionCipher(sessionKey: derived.sessionKey, senderTag: "AND0")
+
+        let ctrl = ScreenControlPayload(action: "start", source: "macos", fps: 15, quality: 55)
+        let ctrlFrame = try WireFrame(messageType: .screenControl, sequenceId: 101, payload: JSONEncoder().encode(ctrl))
+        let rxCtrl = try cipherMac.openFrame(from: try cipherAndroid.seal(frame: ctrlFrame))
+        let decodedCtrl = try JSONDecoder().decode(ScreenControlPayload.self, from: rxCtrl.payload)
+        #expect(decodedCtrl == ctrl)
+
+        let fakeJpeg = Data([0xFF, 0xD8, 0xFF, 0xE0]) + Data((0..<4096).map { UInt8($0 & 0xFF) }) + Data([0xFF, 0xD9])
+        let screenPkt = try ScreenFramePacket(width: 1280, height: 720, timestampMs: 1_770_000_123_000, jpegData: fakeJpeg)
+        let screenFrame = try WireFrame(messageType: .screenFrame, sequenceId: 102, payload: screenPkt.encode())
+        let rxScreen = try cipherAndroid.openFrame(from: try cipherMac.seal(frame: screenFrame))
+        let decodedPkt = try ScreenFramePacket.decode(from: rxScreen.payload)
+        #expect(decodedPkt == screenPkt)
+        #expect(decodedPkt.width == 1280)
+        #expect(decodedPkt.height == 720)
+    }
 }

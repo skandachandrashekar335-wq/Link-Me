@@ -192,15 +192,15 @@ class FileTransferManager(
         return state.finalFile
     }
 
-    fun exportToMediaStoreDownloads(context: Context, verifiedFile: File, mimeType: String) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+    fun exportToMediaStoreDownloads(context: Context, verifiedFile: File, mimeType: String): android.net.Uri? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return android.net.Uri.fromFile(verifiedFile)
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, FilenameSanitizer.sanitize(verifiedFile.name))
             put(MediaStore.Downloads.MIME_TYPE, mimeType)
-            put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/AndroidBridge")
+            put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/Link-Me")
         }
         val resolver = context.contentResolver
-        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
         resolver.openOutputStream(uri)?.use { out ->
             FileInputStream(verifiedFile).use { input ->
                 val buf = ByteArray(CHUNK_SIZE)
@@ -211,6 +211,7 @@ class FileTransferManager(
                 }
             }
         }
+        return uri
     }
 
     companion object {

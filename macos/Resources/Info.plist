@@ -17,13 +17,15 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>1.1.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>
-    <true/>
+    <false/>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>MacBridge captures your Mac display only when you start live Screen Mirroring to your paired Android device.</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>MacBridge uses Bluetooth Low Energy to wake and discover your paired Android device with minimal battery drain.</string>
     <key>NSLocalNetworkUsageDescription</key>

@@ -13,7 +13,10 @@
     { "$ref": "#/$defs/NOTIFICATION_EVENT" },
     { "$ref": "#/$defs/DEVICE_COMMAND" },
     { "$ref": "#/$defs/MEDIA_CONTROL" },
-    { "$ref": "#/$defs/OPEN_URL" }
+    { "$ref": "#/$defs/OPEN_URL" },
+    { "$ref": "#/$defs/PAIR_COMMIT" },
+    { "$ref": "#/$defs/PAIR_ACK" },
+    { "$ref": "#/$defs/SCREEN_CONTROL" }
   ],
   "$defs": {
     "uuid": {
@@ -269,6 +272,71 @@
           "minLength": 10,
           "maxLength": 2048
         }
+      }
+    },
+    "PAIR_COMMIT": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "msgType",
+        "deviceId",
+        "deviceName",
+        "platform",
+        "ephemeralPublicKey",
+        "spkiSha256",
+        "sasMacHex",
+        "batteryLevel",
+        "isCharging",
+        "timestampMs"
+      ],
+      "properties": {
+        "msgType": { "const": "PAIR_COMMIT" },
+        "deviceId": { "$ref": "#/$defs/uuid" },
+        "deviceName": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "platform": { "type": "string", "enum": ["macos", "android"] },
+        "ephemeralPublicKey": { "$ref": "#/$defs/base64Curve25519Key" },
+        "spkiSha256": { "$ref": "#/$defs/sha256Hex" },
+        "sasMacHex": { "$ref": "#/$defs/sha256Hex" },
+        "batteryLevel": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "isCharging": { "type": "boolean" },
+        "timestampMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "PAIR_ACK": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "msgType",
+        "deviceId",
+        "deviceName",
+        "platform",
+        "spkiSha256",
+        "accepted",
+        "batteryLevel",
+        "isCharging",
+        "timestampMs"
+      ],
+      "properties": {
+        "msgType": { "const": "PAIR_ACK" },
+        "deviceId": { "$ref": "#/$defs/uuid" },
+        "deviceName": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "platform": { "type": "string", "enum": ["macos", "android"] },
+        "spkiSha256": { "$ref": "#/$defs/sha256Hex" },
+        "accepted": { "type": "boolean" },
+        "batteryLevel": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "isCharging": { "type": "boolean" },
+        "timestampMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "SCREEN_CONTROL": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "source", "fps", "quality"],
+      "properties": {
+        "action": { "type": "string", "enum": ["start", "stop"] },
+        "source": { "type": "string", "enum": ["macos", "android"] },
+        "fps": { "type": "integer", "minimum": 1, "maximum": 30 },
+        "quality": { "type": "integer", "minimum": 20, "maximum": 95 }
       }
     }
   }

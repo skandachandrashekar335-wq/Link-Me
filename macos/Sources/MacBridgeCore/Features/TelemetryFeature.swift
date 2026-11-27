@@ -1,4 +1,42 @@
 import Foundation
+import IOKit.ps
+
+public struct LocalBatteryReading: Sendable, Equatable {
+    public let level: Int
+    public let isCharging: Bool
+    public let hasBattery: Bool
+
+    public init(level: Int, isCharging: Bool, hasBattery: Bool) {
+        self.level = min(100, max(0, level))
+        self.isCharging = isCharging
+        self.hasBattery = hasBattery
+    }
+}
+
+/// Reads real macOS internal battery capacity & charging status via IOKit PowerSources.
+public enum MacBatteryMonitor {
+    public static func readBattery() -> LocalBatteryReading {
+        guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let sources = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef] else {
+            return LocalBatteryReading(level: 100, isCharging: true, hasBattery: false)
+        }
+        for source in sources {
+            guard let desc = IOPSGetPowerSourceDescription(blob, source)?.takeUnretainedValue() as? [String: Any],
+                  (desc[kIOPSIsPresentKey as String] as? Bool) ?? true else {
+                continue
+            }
+            if let current = desc[kIOPSCurrentCapacityKey as String] as? Int,
+               let maxCap = desc[kIOPSMaxCapacityKey as String] as? Int,
+               maxCap > 0 {
+                let pct = min(100, max(0, (current * 100) / maxCap))
+                let isCharging = (desc[kIOPSIsChargingKey as String] as? Bool)
+                    ?? ((desc[kIOPSPowerSourceStateKey as String] as? String) == kIOPSACPowerValue)
+                return LocalBatteryReading(level: pct, isCharging: isCharging, hasBattery: true)
+            }
+        }
+        return LocalBatteryReading(level: 100, isCharging: true, hasBattery: false)
+    }
+}
 
 /// Feature 5: Peer battery telemetry tracking & "Find My Phone" Ring command dispatch.
 public actor TelemetryFeature {
@@ -13,6 +51,25 @@ public actor TelemetryFeature {
 
     public func updatePeerTelemetry(_ telemetry: PingTelemetryPayload) {
         latestPeerTelemetry = telemetry
+    }
+
+    public func emitLocalTelemetry(deviceId: String, bridgeState: BridgeState) async throws -> PingTelemetryPayload {
+        let reading = MacBatteryMonitor.readBattery()
+        let payload = PingTelemetryPayload(
+            deviceId: deviceId,
+            batteryLevel: reading.level,
+            isCharging: reading.isCharging,
+            batterySaverActive: ProcessInfo.processInfo.isLowPowerModeEnabled,
+            transportState: bridgeState,
+            timestampMs: UInt64(Date().timeIntervalSince1970 * 1000)
+        )
+        if let transport {
+            let data = try JSONEncoder().encode(payload)
+            nextSeq &+= 1
+            let frame = try WireFrame(messageType: .pingTelemetry, sequenceId: nextSeq, payload: data)
+            try await transport.sendFrame(frame, preferBleIfSmall: true)
+        }
+        return payload
     }
 
     public func sendRingPhoneCommand(durationSeconds: Int = 15, now: Date = Date()) async throws -> DeviceCommandPayload {

@@ -38,6 +38,8 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
     private var activeL2CapChannel: CBL2CAPChannel?
     private let replayGuard = ReplayGuard()
     private var packetSeq: UInt32 = 1
+    private var ackWaiters: [UInt32: DispatchSemaphore] = [:]
+    private let ackLock = NSLock()
     private var heartbeatTimer: DispatchSourceTimer?
     private var lastPingSentAt: Date?
 
@@ -83,8 +85,9 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
         queue.async { [weak self] in
             guard let self else { return }
 
+            let isHandshake = frame.messageType == .pairHello || frame.messageType == .pairCommit || frame.messageType == .pairAck
             let envelope: Data
-            if frame.messageType != .pairHello,
+            if !isHandshake,
                let peer = self.activePeer,
                let cipher = try? BluetoothSessionCipher(sessionKey: peer.bluetoothSessionKey, senderTag: "MAC0"),
                let sealed = try? cipher.seal(frame: frame) {
@@ -103,15 +106,23 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
                 return
             }
 
-            let writeType: CBCharacteristicWriteType = char.properties.contains(.writeWithoutResponse)
-                ? .withoutResponse
-                : .withResponse
-            let maxLen = peripheral.maximumWriteValueLength(for: writeType)
-            let mtu = min(512, max(23, maxLen + 3))
+            let packets = BluetoothPacketCodec.packetize(envelope: envelope, packetId: self.packetSeq, mtu: min(512, max(23, peripheral.maximumWriteValueLength(for: .withoutResponse) + 3)))
             let pid = self.packetSeq
             self.packetSeq &+= 1
-            for pkt in BluetoothPacketCodec.packetize(envelope: envelope, packetId: pid, mtu: mtu) {
+            let writeType: CBCharacteristicWriteType = (packets.count <= 2 && char.properties.contains(.writeWithoutResponse))
+                ? .withoutResponse
+                : .withResponse
+
+            let sem: DispatchSemaphore? = packets.count > 1 ? DispatchSemaphore(value: 0) : nil
+            if let sem {
+                self.ackLock.withLock { self.ackWaiters[pid] = sem }
+            }
+            for pkt in packets {
                 peripheral.writeValue(pkt, for: char, type: writeType)
+            }
+            if let sem {
+                _ = sem.wait(timeout: .now() + .milliseconds(800))
+                self.ackLock.withLock { _ = self.ackWaiters.removeValue(forKey: pid) }
             }
         }
     }
@@ -253,6 +264,9 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
               let chunk = characteristic.value else { return }
 
         if chunk.first == BluetoothPacketCodec.ackTag {
+            if let ack = BluetoothPacketCodec.AckPacket.decode(chunk) {
+                ackLock.withLock { ackWaiters[ack.packetId]?.signal() }
+            }
             return
         }
 
@@ -294,6 +308,10 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
             return
         }
         Task { [replayGuard, onInboundFrame] in
+            if frame.messageType == .pairHello || frame.messageType == .pairCommit || frame.messageType == .pairAck {
+                onInboundFrame?(frame)
+                return
+            }
             if (try? await replayGuard.validateAndAccept(frame.sequenceId)) != nil {
                 onInboundFrame?(frame)
             }

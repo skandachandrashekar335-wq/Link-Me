@@ -46,6 +46,7 @@ public final class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate, 
     private let replayGuard = ReplayGuard()
     private var packetSeq: UInt32 = 1
     private var subscribedCentrals: [CBCentral] = []
+    private var pendingNotifyQueue: [Data] = []
     private var activeL2CapChannel: CBL2CAPChannel?
 
     public private(set) var diagnostics = BlePeripheralDiagnostics()
@@ -100,14 +101,33 @@ public final class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate, 
             let minMtu = self.subscribedCentrals.map { max(23, $0.maximumUpdateValueLength + 3) }.min() ?? 23
             let pid = self.packetSeq
             self.packetSeq &+= 1
-            for packet in BluetoothPacketCodec.packetize(envelope: encoded, packetId: pid, mtu: minMtu) {
-                pm.updateValue(packet, for: notifyChar, onSubscribedCentrals: nil)
+            let packets = BluetoothPacketCodec.packetize(envelope: encoded, packetId: pid, mtu: minMtu)
+            self.pendingNotifyQueue.append(contentsOf: packets)
+            if self.pendingNotifyQueue.count > 2048 {
+                self.pendingNotifyQueue.removeFirst(self.pendingNotifyQueue.count - 2048)
+            }
+            self.drainPendingNotifyQueue(pm: pm, char: notifyChar)
+        }
+    }
+
+    private func drainPendingNotifyQueue(pm: CBPeripheralManager, char: CBMutableCharacteristic) {
+        while let next = pendingNotifyQueue.first {
+            if pm.updateValue(next, for: char, onSubscribedCentrals: nil) {
+                pendingNotifyQueue.removeFirst()
+            } else {
+                break
             }
         }
     }
 
+    public func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
+        guard let notifyChar = txNotifyChar else { return }
+        drainPendingNotifyQueue(pm: peripheral, char: notifyChar)
+    }
+
     private func encodeOutgoingPayload(_ frame: WireFrame) -> Data {
-        if frame.messageType != .pairHello,
+        let isHandshake = frame.messageType == .pairHello || frame.messageType == .pairCommit || frame.messageType == .pairAck
+        if !isHandshake,
            let peer = (try? trustStore.allPeers())?.first,
            let cipher = try? BluetoothSessionCipher(sessionKey: peer.bluetoothSessionKey, senderTag: "MAC0"),
            let sealed = try? cipher.seal(frame: frame) {
@@ -294,7 +314,7 @@ public final class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate, 
 
     private func deliverVerified(_ frame: WireFrame) {
         Task { [replayGuard, onInboundFrame] in
-            if frame.messageType == .pairHello {
+            if frame.messageType == .pairHello || frame.messageType == .pairCommit || frame.messageType == .pairAck {
                 onInboundFrame?(frame)
                 return
             }

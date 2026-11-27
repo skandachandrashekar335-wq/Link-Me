@@ -145,11 +145,15 @@ class TransportManager(
             if (!isWifiSocketOpen) {
                 transition(BatteryStateEvent.LOCAL_ACTIVITY_TRIGGERED)
                 val port = wifiOpener?.invoke() ?: 49152
+                val hints = buildList {
+                    WifiTlsServer.localLanIPv4Address()?.let { add(it) }
+                    add("_andromac._tcp.local.")
+                }
                 val wakePayload = WakeWifiPayload(
                     msgType = "WAKE_WIFI",
                     deviceId = deviceId,
                     servicePort = port,
-                    hostHints = listOf("_andromac._tcp.local."),
+                    hostHints = hints,
                     bleTokenHex = "0000000000000000",
                     reason = "high_throughput",
                     timestampMs = System.currentTimeMillis()

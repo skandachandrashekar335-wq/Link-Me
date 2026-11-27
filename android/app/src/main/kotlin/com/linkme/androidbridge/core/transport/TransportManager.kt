@@ -33,13 +33,21 @@ interface FrameTransportSink {
  * Unified dual-transport orchestrator with 4-state battery machine and resettable 15s COOLDOWN_IDLE timer.
  */
 class TransportManager(
-    private val cooldownDurationMs: Long = 15_000L,
+    cooldownDurationMs: Long = 15_000L,
     private val bleSender: ((WireFrame) -> Unit)? = null,
     private val wifiOpener: (() -> Int)? = null,
     private val wifiSender: ((WireFrame) -> Unit)? = null,
     private val wifiCloser: (() -> Unit)? = null,
     private val outboundSink: ((WireFrame, TransportChannel) -> Unit)? = null
 ) : FrameTransportSink {
+    @Volatile
+    var cooldownDurationMs: Long = cooldownDurationMs
+        private set
+
+    @Volatile
+    var bleOnlyBatterySaver: Boolean = false
+        private set
+
     private val stateMachine = BatteryStateMachine()
     private val nextSeq = AtomicLong(1L)
     private val activeStreams = AtomicInteger(0)
@@ -82,11 +90,42 @@ class TransportManager(
     }
 
     @Synchronized
+    fun setCooldownDurationSeconds(seconds: Int) {
+        cooldownDurationMs = seconds.coerceIn(5, 60) * 1000L
+    }
+
+    @Synchronized
+    fun setBleOnlyBatterySaver(enabled: Boolean) {
+        bleOnlyBatterySaver = enabled
+        if (enabled && isWifiSocketOpen && activeStreams.get() == 0) {
+            cooldownFuture?.cancel(false)
+            cooldownFuture = null
+            wifiCloser?.invoke()
+            isWifiSocketOpen = false
+            if (stateMachine.state == BridgeState.ACTIVE_WIFI_STREAM) {
+                transition(BatteryStateEvent.INACTIVITY_THRESHOLD_REACHED)
+            }
+            if (stateMachine.state == BridgeState.COOLDOWN_IDLE) {
+                transition(BatteryStateEvent.COOLDOWN_EXPIRED)
+            }
+        }
+    }
+
+    @Synchronized
     private fun routeFrame(frame: WireFrame, priority: TransferPriority, deviceId: String) {
         if (frame.payload.size <= BLE_THRESHOLD_BYTES && priority == TransferPriority.LOW_LATENCY_CONTROL) {
             bleSender?.invoke(frame)
             outboundSink?.invoke(frame, TransportChannel.BLE_STANDBY)
             return
+        }
+
+        if (bleOnlyBatterySaver) {
+            if (frame.payload.size <= BLE_THRESHOLD_BYTES) {
+                bleSender?.invoke(frame)
+                outboundSink?.invoke(frame, TransportChannel.BLE_STANDBY)
+                return
+            }
+            throw IllegalStateException("BLE_ONLY_BATTERY_SAVER_ACTIVE")
         }
 
         cooldownFuture?.cancel(false)

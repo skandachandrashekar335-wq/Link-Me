@@ -88,6 +88,7 @@ public actor ClipboardSyncManager {
     private var lastObservedChangeCount: Int = -1
     public private(set) var lastSyncedContentHash: String?
     public private(set) var isEnabled: Bool = true
+    public private(set) var direction: ClipboardDirection = .bidirectional
     public private(set) var isPeerReachable: Bool = false
     private var pollTask: Task<Void, Never>?
 
@@ -110,13 +111,18 @@ public actor ClipboardSyncManager {
         updatePollingState()
     }
 
+    public func setDirection(_ direction: ClipboardDirection) {
+        self.direction = direction
+        updatePollingState()
+    }
+
     public func setPeerReachable(_ reachable: Bool) {
         self.isPeerReachable = reachable
         updatePollingState()
     }
 
     private func updatePollingState() {
-        if isEnabled && isPeerReachable {
+        if isEnabled && isPeerReachable && direction.allowsMacOutbound() {
             guard pollTask == nil else { return }
             pollTask = Task { [weak self] in
                 while !Task.isCancelled {
@@ -146,7 +152,7 @@ public actor ClipboardSyncManager {
         _ sample: PasteboardReadSample,
         now: Date = Date()
     ) async throws -> ClipboardSyncPayload? {
-        guard isEnabled else { return nil }
+        guard isEnabled, direction.allowsMacOutbound() else { return nil }
         guard !Self.isConcealed(typeIdentifiers: sample.typeIdentifiers) else {
             return nil
         }
@@ -201,6 +207,7 @@ public actor ClipboardSyncManager {
 
     public func applyRemoteClipboard(_ payload: ClipboardSyncPayload) async throws {
         try payload.validate()
+        guard isEnabled, direction.allowsMacInbound() else { return }
         // CRITICAL: Update lastSyncedContentHash BEFORE mutating NSPasteboard to prevent echo loops.
         lastSyncedContentHash = payload.contentSha256
 

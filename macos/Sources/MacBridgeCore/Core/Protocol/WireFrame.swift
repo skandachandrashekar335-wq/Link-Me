@@ -10,6 +10,8 @@ public enum WireMessageType: UInt8, Codable, Sendable, CaseIterable {
     case fileChunk = 0x07
     case notificationEvent = 0x08
     case deviceCommand = 0x09
+    case mediaControl = 0x0A
+    case openUrl = 0x0B
 }
 
 public enum ProtocolError: Error, Equatable, Sendable {

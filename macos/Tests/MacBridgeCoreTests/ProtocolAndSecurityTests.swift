@@ -357,4 +357,100 @@ struct ProtocolAndSecurityTests {
         #expect(cmd.replyText == "On my way!")
         #expect(await sink.sent.count == 1)
     }
+
+    @Test("BridgePreferences persists across instances and enforces cooldown/clipboard bounds")
+    @MainActor
+    func bridgePreferencesPersistenceAndTransportControls() async throws {
+        let suiteName = "linkme.tests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let prefs = BridgePreferences(defaults: defaults, keyPrefix: "test.")
+        prefs.accentTheme = .mint
+        prefs.compactMode = true
+        prefs.showTelemetryFooter = false
+        prefs.wifiCooldownSeconds = 120 // clamped to 60
+        prefs.bleOnlyBatterySaver = true
+        prefs.autoAcceptFiles = false
+        prefs.clipboardDirection = .macToAndroid
+        prefs.deviceAlias = "Skanda-MacBook"
+
+        let reloaded = BridgePreferences(defaults: defaults, keyPrefix: "test.")
+        #expect(reloaded.accentTheme == .mint)
+        #expect(reloaded.compactMode == true)
+        #expect(reloaded.showTelemetryFooter == false)
+        #expect(reloaded.wifiCooldownSeconds == 60)
+        #expect(reloaded.bleOnlyBatterySaver == true)
+        #expect(reloaded.autoAcceptFiles == false)
+        #expect(reloaded.clipboardDirection == .macToAndroid)
+        #expect(reloaded.deviceAlias == "Skanda-MacBook")
+
+        reloaded.wifiCooldownSeconds = 1 // clamped to 5
+        #expect(reloaded.wifiCooldownSeconds == 5)
+
+        // Verify ClipboardDirection disables Android-to-Mac inbound when set to macToAndroid
+        let adapter = MockPasteboardAdapter()
+        let clipboard = ClipboardSyncManager(
+            deviceId: "11111111-1111-4111-8111-111111111111",
+            pasteboard: adapter
+        )
+        await clipboard.setDirection(.macToAndroid)
+        let incoming = ClipboardSyncPayload(
+            originDeviceId: "22222222-2222-4222-8222-222222222222",
+            clipboardEpoch: 1,
+            contentSha256: ClipboardSyncManager.sha256Hex(Data("blocked".utf8)),
+            mimeType: "text/plain",
+            text: "blocked",
+            isSensitive: false,
+            timestampMs: 1_764_234_999_000
+        )
+        try await clipboard.applyRemoteClipboard(incoming)
+        #expect(adapter.writtenTexts.isEmpty)
+
+        // Verify BLE-only Battery Saver blocks high-throughput Wi-Fi wakeups
+        let transport = TransportManager()
+        await transport.setCooldownDuration(seconds: 42)
+        await transport.setBleOnlyBatterySaver(true)
+        #expect(await transport.configuredCooldownSeconds == 42.0)
+
+        let smallFrame = try WireFrame(messageType: .mediaControl, sequenceId: 1, payload: Data("{\"action\":\"mute\"}".utf8))
+        try await transport.sendFrame(smallFrame, preferBleIfSmall: true)
+
+        let largePayload = Data(repeating: 0x41, count: 600)
+        let largeFrame = try WireFrame(messageType: .clipboardSync, sequenceId: 2, payload: largePayload)
+        await #expect(throws: TransportError.bleOnlyBatterySaverBlocked) {
+            try await transport.sendFrame(largeFrame, preferBleIfSmall: false)
+        }
+    }
+
+    @Test("Wire protocol 0x0A MEDIA_CONTROL and 0x0B OPEN_URL round-trip and UrlSanitizer rejects unsafe schemes")
+    func mediaControlAndUrlSanitizer() async throws {
+        let controller = MacContinuityController()
+        let mediaFrame = try controller.makeMediaControlFrame(action: .playPause)
+        let encodedMedia = FrameEncoder.encode(mediaFrame)
+        let decodedMedia = try WireFrame.decode(from: encodedMedia)
+        #expect(decodedMedia.messageType == .mediaControl)
+        let decodedPayload = try JSONDecoder().decode(MediaControlPayload.self, from: decodedMedia.payload)
+        #expect(decodedPayload.action == .playPause)
+
+        let (urlFrame, safeUrl) = try controller.makeOpenUrlFrame(rawUrl: "https://github.com/skandachandrashekar335-wq/Link-Me")
+        #expect(safeUrl.scheme == "https")
+        let decodedUrlFrame = try WireFrame.decode(from: FrameEncoder.encode(urlFrame))
+        #expect(decodedUrlFrame.messageType == .openUrl)
+        let decodedUrlPayload = try JSONDecoder().decode(OpenUrlPayload.self, from: decodedUrlFrame.payload)
+        #expect(try decodedUrlPayload.validateStrict().host == "github.com")
+
+        #expect(throws: UnsafeUrlError.self) {
+            _ = try UrlSanitizer.validateStrict("file:///etc/passwd")
+        }
+        #expect(throws: UnsafeUrlError.self) {
+            _ = try UrlSanitizer.validateStrict("javascript:alert(1)")
+        }
+        #expect(throws: UnsafeUrlError.self) {
+            _ = try UrlSanitizer.validateStrict("data:text/html,<script>alert(1)</script>")
+        }
+        #expect(throws: UnsafeUrlError.self) {
+            _ = try UrlSanitizer.validateStrict("https://example.com/\nnewline")
+        }
+    }
 }

@@ -8,16 +8,17 @@ struct PairingView: View {
     @ObservedObject var viewModel: BridgeDashboardViewModel
 
     private let countdownTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    private var pal: StudioThemePalette { viewModel.palette }
 
     var body: some View {
         VStack(spacing: 14) {
             Text("CURVE25519 // QR PAIRING")
                 .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .foregroundStyle(StitchTokens.primaryCrimson)
+                .foregroundStyle(pal.primaryAccent)
 
             Text("Pair Android Device")
                 .font(.headline)
-                .foregroundStyle(StitchTokens.onSurface)
+                .foregroundStyle(pal.onSurface)
 
             if let nsImage = qrNSImage(from: viewModel.pairingUriString) {
                 Image(nsImage: nsImage)
@@ -27,21 +28,21 @@ struct PairingView: View {
                     .frame(width: 184, height: 184)
                     .padding(10)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Color.white))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(StitchTokens.outlineVariant, lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(pal.outlineVariant, lineWidth: 1))
             } else {
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(StitchTokens.surfaceContainer)
+                    .fill(pal.surfaceContainer)
                     .frame(width: 184, height: 184)
                     .overlay {
                         Image(systemName: "qrcode")
                             .font(.largeTitle)
-                            .foregroundStyle(StitchTokens.secondaryText)
+                            .foregroundStyle(pal.secondaryText)
                     }
             }
 
             Text("EXPIRES IN \(formattedCountdown)")
                 .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(StitchTokens.secondaryText)
+                .foregroundStyle(pal.secondaryText)
 
             if let approval = viewModel.pendingApproval {
                 VStack(spacing: 6) {
@@ -50,14 +51,14 @@ struct PairingView: View {
                     Text(approval.sasCode)
                         .font(.system(.title, design: .monospaced).bold())
                         .tracking(4)
-                        .foregroundStyle(StitchTokens.tertiaryMint)
+                        .foregroundStyle(pal.secondaryAccent)
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity)
                 .background(
                     RoundedRectangle(cornerRadius: 8)
-                        .fill(StitchTokens.surfaceContainer)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(StitchTokens.primaryCrimson, lineWidth: 1))
+                        .fill(pal.surfaceContainer)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(pal.primaryAccent, lineWidth: 1))
                 )
                 HStack(spacing: 12) {
                     Button("Reject", role: .destructive) {
@@ -67,12 +68,12 @@ struct PairingView: View {
                         viewModel.confirmPairing()
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(StitchTokens.primaryCrimson)
+                    .tint(pal.primaryAccent)
                 }
             } else {
                 Text("Scan with AndroidBridge to verify 6-digit SAS")
                     .font(.caption)
-                    .foregroundStyle(StitchTokens.secondaryText)
+                    .foregroundStyle(pal.secondaryText)
                 Button("Close") {
                     viewModel.rejectPairing()
                 }
@@ -81,8 +82,8 @@ struct PairingView: View {
         }
         .padding(20)
         .frame(width: 340)
-        .background(StitchTokens.surface)
-        .foregroundStyle(StitchTokens.onSurface)
+        .background(pal.surface)
+        .foregroundStyle(pal.onSurface)
         .onReceive(countdownTimer) { now in
             viewModel.pairingRemainingSeconds = max(0, Int(viewModel.pairingExpiresAt.timeIntervalSince(now)))
         }

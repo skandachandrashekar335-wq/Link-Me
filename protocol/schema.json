@@ -11,7 +11,9 @@
     { "$ref": "#/$defs/FILE_OFFER" },
     { "$ref": "#/$defs/FILE_RESPONSE" },
     { "$ref": "#/$defs/NOTIFICATION_EVENT" },
-    { "$ref": "#/$defs/DEVICE_COMMAND" }
+    { "$ref": "#/$defs/DEVICE_COMMAND" },
+    { "$ref": "#/$defs/MEDIA_CONTROL" },
+    { "$ref": "#/$defs/OPEN_URL" }
   ],
   "$defs": {
     "uuid": {
@@ -243,6 +245,30 @@
         "replyText": { "type": "string", "minLength": 1, "maxLength": 4096 },
         "durationSeconds": { "type": "integer", "minimum": 1, "maximum": 120 },
         "timestampMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "MEDIA_CONTROL": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action"],
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["play_pause", "next", "prev", "vol_up", "vol_down", "mute"]
+        }
+      }
+    },
+    "OPEN_URL": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "^https?://[^\\s\\u0000-\\u001f\\u007f]+$",
+          "minLength": 10,
+          "maxLength": 2048
+        }
       }
     }
   }

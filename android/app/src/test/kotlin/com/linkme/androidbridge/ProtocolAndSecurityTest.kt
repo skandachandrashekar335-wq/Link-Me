@@ -8,6 +8,10 @@ import com.linkme.androidbridge.core.crypto.PairingCrypto
 import com.linkme.androidbridge.core.crypto.PairingUriPayload
 import com.linkme.androidbridge.core.crypto.TrustStore
 import com.linkme.androidbridge.core.crypto.TrustedPeer
+import com.linkme.androidbridge.core.prefs.BridgeAccentTheme
+import com.linkme.androidbridge.core.prefs.BridgePreferencesStore
+import com.linkme.androidbridge.core.prefs.ClipboardDirection
+import com.linkme.androidbridge.core.prefs.InMemoryPreferenceStore
 import com.linkme.androidbridge.core.protocol.ClipboardSyncPayload
 import com.linkme.androidbridge.core.protocol.DeviceCommandPayload
 import com.linkme.androidbridge.core.protocol.FileChunkPacket
@@ -15,14 +19,22 @@ import com.linkme.androidbridge.core.protocol.FileOfferPayload
 import com.linkme.androidbridge.core.protocol.FilenameSanitizer
 import com.linkme.androidbridge.core.protocol.FrameDecoder
 import com.linkme.androidbridge.core.protocol.FrameEncoder
+import com.linkme.androidbridge.core.protocol.MediaControlAction
+import com.linkme.androidbridge.core.protocol.MediaControlPayload
 import com.linkme.androidbridge.core.protocol.NotificationEventPayload
+import com.linkme.androidbridge.core.protocol.OpenUrlPayload
 import com.linkme.androidbridge.core.protocol.ProtocolError
 import com.linkme.androidbridge.core.protocol.ReplayGuard
 import com.linkme.androidbridge.core.protocol.UnsafeFilenameException
+import com.linkme.androidbridge.core.protocol.UnsafeUrlException
+import com.linkme.androidbridge.core.protocol.UrlSanitizer
 import com.linkme.androidbridge.core.protocol.WireFrame
+import com.linkme.androidbridge.core.protocol.WireMessageType
+import com.linkme.androidbridge.core.transport.TransferPriority
 import com.linkme.androidbridge.core.transport.TransportManager
 import com.linkme.androidbridge.service.ClipboardSyncManager
 import com.linkme.androidbridge.service.ClipboardSystemAdapter
+import com.linkme.androidbridge.service.ContinuityFeature
 import com.linkme.androidbridge.service.FileTransferException
 import com.linkme.androidbridge.service.FileTransferManager
 import com.linkme.androidbridge.service.NotificationCompanionBridge
@@ -448,5 +460,102 @@ class ProtocolAndSecurityTest {
 
         assertEquals(null, NotificationCompanionBridge.decodeNotificationEventJson("invalid"))
         assertEquals(null, NotificationCompanionBridge.decodeDeviceCommandJson("x".repeat(300 * 1024)))
+    }
+
+    @Test
+    fun bridgePreferencesPersistenceAndRuntimeControls() {
+        val backend = InMemoryPreferenceStore()
+        val store = BridgePreferencesStore(backend)
+        store.setAccentTheme(BridgeAccentTheme.AMBER)
+        store.setCompactMode(true)
+        store.setShowTelemetryFooter(false)
+        store.setWifiCooldownSeconds(99)
+        store.setBleOnlyBatterySaver(true)
+        store.setAutoAcceptFiles(false)
+        store.setClipboardDirection(ClipboardDirection.ANDROID_TO_MAC)
+        store.setDeviceAlias("Pixel-Studio")
+
+        val reloaded = BridgePreferencesStore(backend)
+        val state = reloaded.state.value
+        assertEquals(BridgeAccentTheme.AMBER, state.accentTheme)
+        assertTrue(state.compactMode)
+        assertFalse(state.showTelemetryFooter)
+        assertEquals(60, state.wifiCooldownSeconds)
+        assertTrue(state.bleOnlyBatterySaver)
+        assertFalse(state.autoAcceptFiles)
+        assertEquals(ClipboardDirection.ANDROID_TO_MAC, state.clipboardDirection)
+        assertEquals("Pixel-Studio", state.deviceAlias)
+
+        reloaded.setWifiCooldownSeconds(1)
+        assertEquals(5, reloaded.state.value.wifiCooldownSeconds)
+
+        // ClipboardDirection.ANDROID_TO_MAC rejects Mac -> Android inbound
+        val adapter = MockClipboardAdapter()
+        val clipboard = ClipboardSyncManager(
+            deviceId = "22222222-2222-4222-8222-222222222222",
+            adapter = adapter
+        )
+        clipboard.direction = ClipboardDirection.ANDROID_TO_MAC
+        val remotePayload = ClipboardSyncPayload(
+            originDeviceId = "11111111-1111-4111-8111-111111111111",
+            clipboardEpoch = 1L,
+            contentSha256 = ClipboardSyncManager.sha256Hex("blocked".toByteArray()),
+            mimeType = "text/plain",
+            text = "blocked",
+            isSensitive = false,
+            timestampMs = 1_764_234_999_000L
+        )
+        clipboard.applyRemoteClipboard(remotePayload)
+        assertTrue(adapter.written.isEmpty())
+
+        // BLE-only Battery Saver blocks > 400B Wi-Fi wakeups while allowing <= 400B control frames
+        val transport = TransportManager()
+        transport.setCooldownDurationSeconds(45)
+        transport.setBleOnlyBatterySaver(true)
+        assertEquals(45_000L, transport.cooldownDurationMs)
+        transport.sendFrame(WireMessageType.MEDIA_CONTROL, """{"action":"mute"}""".toByteArray(), TransferPriority.LOW_LATENCY_CONTROL)
+
+        var wifiBlocked = false
+        try {
+            transport.sendFrame(WireMessageType.CLIPBOARD_SYNC, ByteArray(600) { 0x41 }, TransferPriority.HIGH_THROUGHPUT)
+        } catch (_: IllegalStateException) {
+            wifiBlocked = true
+        }
+        assertTrue(wifiBlocked)
+    }
+
+    @Test
+    fun mediaControlAndOpenUrlRoundTripAndSanitizer() {
+        val continuity = ContinuityFeature()
+        val mediaFrame = continuity.makeMediaControlFrame(MediaControlAction.NEXT)
+        val decodedMedia = WireFrame.decode(mediaFrame.encode())
+        assertEquals(WireMessageType.MEDIA_CONTROL, decodedMedia.messageType)
+        val mediaPayload = json.decodeFromString<MediaControlPayload>(decodedMedia.payload.decodeToString())
+        assertEquals(MediaControlAction.NEXT, mediaPayload.resolveAction())
+
+        val (urlFrame, safeUrl) = continuity.makeOpenUrlFrame("https://example.org/docs?v=3")
+        assertEquals("https://example.org/docs?v=3", safeUrl)
+        val decodedUrl = WireFrame.decode(urlFrame.encode())
+        assertEquals(WireMessageType.OPEN_URL, decodedUrl.messageType)
+        val urlPayload = json.decodeFromString<OpenUrlPayload>(decodedUrl.payload.decodeToString())
+        assertEquals("https://example.org/docs?v=3", urlPayload.validateStrict())
+
+        val unsafeInputs = listOf(
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "intent://scan/#Intent;end",
+            "https://example.com/\nbad",
+            "not-a-url"
+        )
+        for (bad in unsafeInputs) {
+            var rejected = false
+            try {
+                UrlSanitizer.validateStrict(bad)
+            } catch (_: UnsafeUrlException) {
+                rejected = true
+            }
+            assertTrue("Expected UrlSanitizer rejection for $bad", rejected)
+        }
     }
 }

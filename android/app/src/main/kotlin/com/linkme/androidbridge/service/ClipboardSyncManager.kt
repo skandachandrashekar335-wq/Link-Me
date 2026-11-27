@@ -5,6 +5,7 @@ import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.os.Build
 import android.os.PersistableBundle
+import com.linkme.androidbridge.core.prefs.ClipboardDirection
 import com.linkme.androidbridge.core.protocol.ClipboardSyncPayload
 import com.linkme.androidbridge.core.protocol.WireFrame
 import com.linkme.androidbridge.core.protocol.WireMessageType
@@ -41,6 +42,9 @@ class ClipboardSyncManager(
     var lastSyncedContentHash: String? = null
         private set
 
+    @Volatile
+    var direction: ClipboardDirection = ClipboardDirection.BIDIRECTIONAL
+
     fun isSensitiveClip(extras: PersistableBundle?): Boolean {
         if (extras == null) return false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -56,7 +60,7 @@ class ClipboardSyncManager(
         isSensitive: Boolean,
         nowMs: Long = System.currentTimeMillis()
     ): ClipboardSyncPayload? {
-        if (isSensitive || text.isEmpty()) return null
+        if (!direction.allowsAndroidOutbound() || isSensitive || text.isEmpty()) return null
         val hash = sha256Hex(text.toByteArray(Charsets.UTF_8))
         if (hash == lastSyncedContentHash) {
             return null
@@ -86,6 +90,7 @@ class ClipboardSyncManager(
 
     fun applyRemoteClipboard(payload: ClipboardSyncPayload) {
         payload.validate()
+        if (!direction.allowsAndroidInbound()) return
         // CRITICAL: Update lastSyncedContentHash BEFORE mutating ClipboardManager.
         lastSyncedContentHash = payload.contentSha256
         if (payload.mimeType == "text/plain" && !payload.text.isNullOrEmpty()) {

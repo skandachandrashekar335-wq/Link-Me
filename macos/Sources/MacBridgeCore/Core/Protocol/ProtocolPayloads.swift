@@ -304,3 +304,35 @@ public struct DeviceCommandPayload: Codable, Sendable, Equatable {
         self.timestampMs = timestampMs
     }
 }
+
+public enum MediaControlAction: String, Codable, CaseIterable, Sendable {
+    case playPause = "play_pause"
+    case next
+    case prev
+    case volUp = "vol_up"
+    case volDown = "vol_down"
+    case mute
+}
+
+/// Binary frame 0x0A MEDIA_CONTROL JSON payload.
+public struct MediaControlPayload: Codable, Sendable, Equatable {
+    public let action: MediaControlAction
+
+    public init(action: MediaControlAction) {
+        self.action = action
+    }
+}
+
+/// Binary frame 0x0B OPEN_URL JSON payload validated strictly for http/https URLs.
+public struct OpenUrlPayload: Codable, Sendable, Equatable {
+    public let url: String
+
+    public init(url: String) throws {
+        let validated = try UrlSanitizer.validateStrict(url)
+        self.url = validated.absoluteString
+    }
+
+    public func validateStrict() throws -> URL {
+        try UrlSanitizer.validateStrict(url)
+    }
+}

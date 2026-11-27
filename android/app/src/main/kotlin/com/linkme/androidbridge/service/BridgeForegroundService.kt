@@ -23,11 +23,15 @@ import com.linkme.androidbridge.R
 import com.linkme.androidbridge.core.crypto.BlePrivacyBeacon
 import com.linkme.androidbridge.core.crypto.IdentityManager
 import com.linkme.androidbridge.core.crypto.TrustStore
+import com.linkme.androidbridge.core.prefs.BridgePreferencesStore
 import com.linkme.androidbridge.core.protocol.BridgeState
 import com.linkme.androidbridge.core.protocol.ClipboardSyncPayload
 import com.linkme.androidbridge.core.protocol.DeviceCommandPayload
 import com.linkme.androidbridge.core.protocol.FileChunkPacket
 import com.linkme.androidbridge.core.protocol.FileOfferPayload
+import com.linkme.androidbridge.core.protocol.FileResponsePayload
+import com.linkme.androidbridge.core.protocol.MediaControlPayload
+import com.linkme.androidbridge.core.protocol.OpenUrlPayload
 import com.linkme.androidbridge.core.protocol.WakeWifiPayload
 import com.linkme.androidbridge.core.protocol.WireFrame
 import com.linkme.androidbridge.core.protocol.WireMessageType
@@ -66,6 +70,8 @@ class BridgeForegroundService : Service() {
     @Volatile private var clipboardSyncManager: ClipboardSyncManager? = null
     @Volatile private var fileTransferManager: FileTransferManager? = null
     @Volatile private var telemetryFeature: TelemetryFeature? = null
+    @Volatile private var continuityFeature: ContinuityFeature? = null
+    @Volatile private var preferencesStore: BridgePreferencesStore? = null
     @Volatile private var blePeripheralManager: BlePeripheralManager? = null
     @Volatile private var wifiTlsServer: WifiTlsServer? = null
     @Volatile private var wifiTlsClient: WifiTlsClient? = null
@@ -114,6 +120,9 @@ class BridgeForegroundService : Service() {
         batteryReceiver = null
         BridgeNotificationListener.onNotificationEvent = null
         NotificationCompanionBridge.onNotificationEvent = null
+        BridgeActivityHub.onSendMediaAction = null
+        BridgeActivityHub.onSendOpenUrl = null
+        BridgeActivityHub.onResolvePendingFileOffer = null
         onManualClipboardSyncRequested = null
 
         runCatching { stopWifiTransport() }
@@ -162,13 +171,85 @@ class BridgeForegroundService : Service() {
                 adapter = clipAdapter,
                 transport = transport
             )
+            val continuity = ContinuityFeature(transport)
+            val prefsStore = BridgePreferencesStore.forContext(this)
 
             identityManager = idMgr
             trustStore = store
             fileTransferManager = transferMgr
             telemetryFeature = telemetry
+            continuityFeature = continuity
+            preferencesStore = prefsStore
             transportManager = transport
             clipboardSyncManager = clipSync
+
+            serviceScope.launch {
+                prefsStore.state.collect { prefs ->
+                    transport.setCooldownDurationSeconds(prefs.wifiCooldownSeconds)
+                    transport.setBleOnlyBatterySaver(prefs.bleOnlyBatterySaver)
+                    clipSync.direction = prefs.clipboardDirection
+                }
+            }
+
+            BridgeActivityHub.onSendMediaAction = { action ->
+                serviceScope.launch {
+                    runCatching {
+                        continuity.sendMediaControl(action)
+                        BridgeActivityHub.record(
+                            BridgeActivityItem(
+                                category = ActivityCategory.TRANSPORT,
+                                title = "Media Command Sent",
+                                detail = action.wireName.uppercase()
+                            )
+                        )
+                    }
+                }
+            }
+
+            BridgeActivityHub.onSendOpenUrl = { rawUrl ->
+                serviceScope.launch {
+                    runCatching {
+                        val safe = continuity.sendOpenUrl(rawUrl)
+                        BridgeActivityHub.record(
+                            BridgeActivityItem(
+                                category = ActivityCategory.TRANSPORT,
+                                title = "URL Beamed to Mac",
+                                detail = safe
+                            )
+                        )
+                    }
+                }
+            }
+
+            BridgeActivityHub.onResolvePendingFileOffer = { offer, accepted ->
+                serviceScope.launch {
+                    runCatching {
+                        val resp = if (accepted) {
+                            transferMgr.beginIncomingTransfer(offer)
+                        } else {
+                            FileResponsePayload(
+                                transferId = offer.transferId,
+                                accepted = false,
+                                resumeChunkIndex = 0,
+                                reason = "DECLINED_BY_USER"
+                            )
+                        }
+                        val respBytes = json.encodeToString(resp).toByteArray(Charsets.UTF_8)
+                        transport.sendFrame(
+                            WireMessageType.FILE_RESPONSE,
+                            respBytes,
+                            TransferPriority.LOW_LATENCY_CONTROL
+                        )
+                        BridgeActivityHub.record(
+                            BridgeActivityItem(
+                                category = ActivityCategory.FILES,
+                                title = if (accepted) "Accepted Incoming File" else "Declined Incoming File",
+                                detail = offer.filename
+                            )
+                        )
+                    }
+                }
+            }
 
             val pairedPeer = store.allPeers().firstOrNull()
             val beacon = pairedPeer?.let { BlePrivacyBeacon(it.sharedBleSecret) }
@@ -289,20 +370,44 @@ class BridgeForegroundService : Service() {
 
             WireMessageType.CLIPBOARD_SYNC -> {
                 runCatching { json.decodeFromString<ClipboardSyncPayload>(frame.payload.decodeToString()) }
-                    .onSuccess { clipSync?.applyRemoteClipboard(it) }
+                    .onSuccess { payload ->
+                        clipSync?.applyRemoteClipboard(payload)
+                        payload.text?.let { snippet ->
+                            BridgeActivityHub.record(
+                                BridgeActivityItem(
+                                    category = ActivityCategory.CLIPBOARD,
+                                    title = "Clipboard From Mac",
+                                    detail = snippet.take(120),
+                                    clipboardText = snippet
+                                )
+                            )
+                        }
+                    }
             }
 
             WireMessageType.FILE_OFFER -> {
                 if (transferMgr != null && transport != null) {
                     runCatching { json.decodeFromString<FileOfferPayload>(frame.payload.decodeToString()) }
                         .onSuccess { offer ->
-                            val response = transferMgr.beginIncomingTransfer(offer)
-                            val respBytes = json.encodeToString(response).toByteArray(Charsets.UTF_8)
-                            transport.sendFrame(
-                                WireMessageType.FILE_RESPONSE,
-                                respBytes,
-                                TransferPriority.LOW_LATENCY_CONTROL
-                            )
+                            val autoAccept = preferencesStore?.state?.value?.autoAcceptFiles ?: true
+                            if (!autoAccept) {
+                                BridgeActivityHub.setPendingOffer(offer)
+                                BridgeActivityHub.record(
+                                    BridgeActivityItem(
+                                        category = ActivityCategory.FILES,
+                                        title = "File Offer Pending Approval",
+                                        detail = "${offer.filename} (${offer.byteSize / 1024} KB)"
+                                    )
+                                )
+                            } else {
+                                val response = transferMgr.beginIncomingTransfer(offer)
+                                val respBytes = json.encodeToString(response).toByteArray(Charsets.UTF_8)
+                                transport.sendFrame(
+                                    WireMessageType.FILE_RESPONSE,
+                                    respBytes,
+                                    TransferPriority.LOW_LATENCY_CONTROL
+                                )
+                            }
                         }
                 }
             }
@@ -314,10 +419,18 @@ class BridgeForegroundService : Service() {
                             val progress = transferMgr.receiveChunk(packet)
                             if (progress.bytesTransferred >= progress.totalBytes) {
                                 val verifiedFile = transferMgr.finalizeIncomingTransfer(packet.transferId)
-                                transferMgr.exportToMediaStoreDownloads(
+                                val exportedUri = transferMgr.exportToMediaStoreDownloads(
                                     this,
                                     verifiedFile,
                                     "application/octet-stream"
+                                )
+                                BridgeActivityHub.record(
+                                    BridgeActivityItem(
+                                        category = ActivityCategory.FILES,
+                                        title = "Received File",
+                                        detail = verifiedFile.name,
+                                        fileUriString = exportedUri?.toString()
+                                    )
                                 )
                             }
                         }
@@ -329,6 +442,36 @@ class BridgeForegroundService : Service() {
                     .onSuccess { command ->
                         telemetry?.handleDeviceCommand(this, command)
                         NotificationCompanionBridge.dispatchDeviceCommand(this, command)
+                    }
+            }
+
+            WireMessageType.MEDIA_CONTROL -> {
+                runCatching { json.decodeFromString<MediaControlPayload>(frame.payload.decodeToString()) }
+                    .onSuccess { payload ->
+                        continuityFeature?.handleInboundMediaControl(this, payload)
+                        BridgeActivityHub.record(
+                            BridgeActivityItem(
+                                category = ActivityCategory.TRANSPORT,
+                                title = "Remote Media Control",
+                                detail = payload.action.uppercase()
+                            )
+                        )
+                    }
+            }
+
+            WireMessageType.OPEN_URL -> {
+                runCatching { json.decodeFromString<OpenUrlPayload>(frame.payload.decodeToString()) }
+                    .onSuccess { payload ->
+                        val safe = continuityFeature?.handleInboundOpenUrl(this, payload)
+                        if (safe != null) {
+                            BridgeActivityHub.record(
+                                BridgeActivityItem(
+                                    category = ActivityCategory.TRANSPORT,
+                                    title = "Opened URL From Mac",
+                                    detail = safe
+                                )
+                            )
+                        }
                     }
             }
 

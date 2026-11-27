@@ -10,6 +10,10 @@ public enum TransferPriority: Sendable, Equatable {
     case highThroughput
 }
 
+public enum TransportError: Error, Equatable, Sendable {
+    case bleOnlyBatterySaverBlocked
+}
+
 public protocol FrameTransportSink: Sendable {
     func sendFrame(_ frame: WireFrame, preferBleIfSmall: Bool) async throws
 }
@@ -26,7 +30,8 @@ public actor TransportManager: FrameTransportSink {
     private var stateMachine = BatteryStateMachine()
     private var nextSequenceId: UInt64 = 1
     private let replayGuard = ReplayGuard()
-    private let cooldownDurationSeconds: TimeInterval
+    private var cooldownDurationSeconds: TimeInterval
+    private var bleOnlyBatterySaver: Bool = false
     private var cooldownTask: Task<Void, Never>?
     private var activeStreams: Int = 0
     private var isWifiSocketOpen: Bool = false
@@ -66,6 +71,29 @@ public actor TransportManager: FrameTransportSink {
     public func setOutboundRecorder(_ recorder: @escaping @Sendable (WireFrame, TransportChannel) async -> Void) {
         self.outboundRecorder = recorder
     }
+
+    public func setCooldownDuration(seconds: Int) {
+        self.cooldownDurationSeconds = TimeInterval(BridgePreferences.clampCooldown(seconds))
+    }
+
+    public func setBleOnlyBatterySaver(_ enabled: Bool) async {
+        self.bleOnlyBatterySaver = enabled
+        if enabled && isWifiSocketOpen && activeStreams == 0 {
+            cooldownTask?.cancel()
+            cooldownTask = nil
+            await wifiCloser?()
+            isWifiSocketOpen = false
+            if bridgeState == .activeWifiStream {
+                _ = transition(.inactivityThresholdReached)
+            }
+            if bridgeState == .cooldownIdle {
+                _ = transition(.cooldownExpired)
+            }
+        }
+    }
+
+    public var isBleOnlyBatterySaverEnabled: Bool { bleOnlyBatterySaver }
+    public var configuredCooldownSeconds: TimeInterval { cooldownDurationSeconds }
 
     public func transition(_ event: BatteryStateEvent) -> BridgeState {
         bridgeState = stateMachine.handle(event)
@@ -109,6 +137,15 @@ public actor TransportManager: FrameTransportSink {
             try await bleSender?(frame)
             await outboundRecorder?(frame, .bleStandby)
             return
+        }
+
+        if bleOnlyBatterySaver {
+            if frame.payload.count <= Self.bleControlThresholdBytes {
+                try await bleSender?(frame)
+                await outboundRecorder?(frame, .bleStandby)
+                return
+            }
+            throw TransportError.bleOnlyBatterySaverBlocked
         }
 
         // High-throughput or > 400B payload: wake Wi-Fi mTLS 1.3

@@ -30,14 +30,14 @@ Every frame has a fixed **16-byte header** followed immediately by `Payload Leng
 | :--- | :--- | :--- | :--- |
 | `0` | `2B` | **Magic** | Constant `0x41 0x4D` (`"AM"`). Any other value MUST abort frame parsing and close the socket. |
 | `2` | `1B` | **Version** | Protocol version. Must equal `0x01`. Unsupported versions MUST be rejected. |
-| `3` | `1B` | **MsgType** | Message type enum (`0x01`–`0x09`). Unknown types MUST be rejected. |
+| `3` | `1B` | **MsgType** | Message type enum (`0x01`–`0x0B`). Unknown types MUST be rejected. |
 | `4` | `4B` | **Payload Length BE** | Unsigned 32-bit big-endian payload byte count. Hard maximum: `1,048,576` bytes (`1 MB` control cap; `65,536` bytes per `FILE_CHUNK` data slice). |
 | `8` | `8B` | **SequenceID BE** | Unsigned 64-bit big-endian monotonic counter starting at `1` per TLS session, validated via a 64-bit sliding `ReplayGuard`. |
 | `16` | `N B` | **Payload** | UTF-8 JSON object conforming to [`protocol/schema.json`](../protocol/schema.json) (for control messages), or binary chunk record (for `0x07 FILE_CHUNK`). |
 
 ---
 
-## 2. Message Type Enums (`0x01`–`0x09`)
+## 2. Message Type Enums (`0x01`–`0x0B`)
 
 | Code | Name | Direction | Payload Format | Purpose |
 | :--- | :--- | :--- | :--- | :--- |
@@ -50,6 +50,8 @@ Every frame has a fixed **16-byte header** followed immediately by `Payload Leng
 | `0x07` | `FILE_CHUNK` | Sender -> Receiver | Binary | Raw chunk payload: `16B transferUUID` + `4B chunkIndex BE` + `4B dataLength BE` + `32B chunkSHA256` + `dataLength` bytes (`<= 65,536` B default, `<= 262,144` B max). |
 | `0x08` | `NOTIFICATION_EVENT` | Android -> macOS | JSON | Mirrored notification event (`action: "POST" \| "DISMISS"`, `sbnKey`, `appName`, `packageName`, `title`, `body`, `timestampMs`, `canReply`). |
 | `0x09` | `DEVICE_COMMAND` | Both | JSON | Remote command (`command: "replyToNotification" \| "dismissNotification" \| "ringPhone" \| "stopRing"`, `sbnKey`, `replyText`, `durationSeconds`, `timestampMs`). |
+| `0x0A` | `MEDIA_CONTROL` | Both | JSON | Remote playback/volume command (`action: "play_pause" \| "next" \| "prev" \| "vol_up" \| "vol_down" \| "mute"`). |
+| `0x0B` | `OPEN_URL` | Both | JSON | Remote browser URL handoff (`url`, strictly validated by `UrlSanitizer` to allow only `http://` or `https://`). |
 
 ---
 

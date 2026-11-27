@@ -162,3 +162,32 @@ data class DeviceCommandPayload(
     val durationSeconds: Int? = null,
     val timestampMs: Long
 )
+
+@Serializable
+enum class MediaControlAction(val wireName: String) {
+    PLAY_PAUSE("play_pause"),
+    NEXT("next"),
+    PREV("prev"),
+    VOL_UP("vol_up"),
+    VOL_DOWN("vol_down"),
+    MUTE("mute");
+
+    companion object {
+        fun fromWireName(raw: String): MediaControlAction? =
+            entries.firstOrNull { it.wireName == raw }
+    }
+}
+
+@Serializable
+data class MediaControlPayload(
+    val action: String
+) {
+    fun resolveAction(): MediaControlAction? = MediaControlAction.fromWireName(action)
+}
+
+@Serializable
+data class OpenUrlPayload(
+    val url: String
+) {
+    fun validateStrict(): String = UrlSanitizer.validateStrict(url)
+}

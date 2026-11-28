@@ -228,9 +228,9 @@ class TransportManager(
             {
                 synchronized(this) {
                     if (activeStreams.get() == 0 && isWifiSocketOpen) {
-                        wifiCloser?.invoke()
                         isWifiSocketOpen = false
                         transition(BatteryStateEvent.COOLDOWN_EXPIRED)
+                        wifiCloser?.invoke()
                     }
                 }
             },

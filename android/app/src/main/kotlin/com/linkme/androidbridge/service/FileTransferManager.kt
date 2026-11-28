@@ -217,12 +217,12 @@ class FileTransferManager(
             throw FileTransferException("Final SHA-256 mismatch: expected=${state.offer.sha256}, actual=$actualHex")
         }
 
-        if (state.finalFile.exists()) state.finalFile.delete()
-        if (!state.partFile.renameTo(state.finalFile)) {
+        val resolvedFinal = resolveUniqueDestination(state.finalFile.parentFile ?: receiveDir, state.finalFile.name)
+        if (!state.partFile.renameTo(resolvedFinal)) {
             state.partFile.delete()
             throw FileTransferException("Failed to rename .part file")
         }
-        return state.finalFile
+        return resolvedFinal
     }
 
     fun exportToMediaStoreDownloads(context: Context, verifiedFile: File, mimeType: String): android.net.Uri? {
@@ -249,6 +249,22 @@ class FileTransferManager(
 
     companion object {
         const val CHUNK_SIZE = 65_536 // 64 KB
+
+        fun resolveUniqueDestination(directory: File, filename: String): File {
+            val initial = File(directory, filename)
+            if (!initial.exists()) return initial
+            val dot = filename.lastIndexOf('.')
+            val (stem, ext) = if (dot > 0) {
+                filename.substring(0, dot) to filename.substring(dot)
+            } else {
+                filename to ""
+            }
+            for (index in 1..9999) {
+                val candidate = File(directory, "$stem ($index)$ext")
+                if (!candidate.exists()) return candidate
+            }
+            return File(directory, "$stem-${UUID.randomUUID().toString().take(8)}$ext")
+        }
 
         fun streamingSha256Hex(input: InputStream): String {
             val digest = MessageDigest.getInstance("SHA-256")

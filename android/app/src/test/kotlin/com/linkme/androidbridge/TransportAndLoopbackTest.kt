@@ -847,5 +847,71 @@ class TransportAndLoopbackTest {
             RemoteInputPayload(type = "key", action = "back")
         )
         assertEquals("input keyevent 4", backCmd)
+
+        // 7. v2.1.1 Audit regressions: 31B legacy BLE cap, collision-safe filenames, Shizuku special chars, Unpair cleanup
+        val pairingAdvBytes = com.linkme.androidbridge.core.transport.BleAdvertisementBudget.primaryAdvertisementBytes(
+            includeServiceUuid = false,
+            serviceDataPayloadLength = 4,
+            connectable = true
+        )
+        assertEquals(25, pairingAdvBytes)
+        assertTrue(pairingAdvBytes <= com.linkme.androidbridge.core.transport.BleAdvertisementBudget.MAX_LEGACY_ADV_BYTES)
+        val beaconAdvBytes = com.linkme.androidbridge.core.transport.BleAdvertisementBudget.primaryAdvertisementBytes(
+            includeServiceUuid = false,
+            serviceDataPayloadLength = 8,
+            connectable = true
+        )
+        assertEquals(29, beaconAdvBytes)
+        assertTrue(beaconAdvBytes <= com.linkme.androidbridge.core.transport.BleAdvertisementBudget.MAX_LEGACY_ADV_BYTES)
+        val unsafeCombinedBytes = com.linkme.androidbridge.core.transport.BleAdvertisementBudget.primaryAdvertisementBytes(
+            includeServiceUuid = true,
+            serviceDataPayloadLength = 4,
+            connectable = true
+        )
+        assertEquals(43, unsafeCombinedBytes)
+        assertTrue(unsafeCombinedBytes > com.linkme.androidbridge.core.transport.BleAdvertisementBudget.MAX_LEGACY_ADV_BYTES)
+        assertTrue(
+            com.linkme.androidbridge.core.transport.BleAdvertisementBudget.scanResponseBytes(includeServiceUuid = true) <=
+                com.linkme.androidbridge.core.transport.BleAdvertisementBudget.MAX_LEGACY_ADV_BYTES
+        )
+
+        val shellEscapeCmd = com.linkme.androidbridge.service.ShizukuInputCommandBuilder.buildShellCommand(
+            RemoteInputPayload(type = "text", text = "hello & \$(rm) ; 'test' 😀")
+        )
+        assertEquals("input text 'hello%s&%s\$(rm)%s;%s'\\''test'\\''%s'", shellEscapeCmd)
+
+        val collisionRoot = kotlin.io.path.createTempDirectory("linkme-audit-file-test").toFile()
+        try {
+            val sanitizedSpaceName = com.linkme.androidbridge.core.protocol.FilenameSanitizer.validateStrict("report (final).pdf")
+            assertEquals("report (final).pdf", sanitizedSpaceName)
+            File(collisionRoot, "photo.jpg").writeText("first")
+            val nextFile = com.linkme.androidbridge.service.FileTransferManager.resolveUniqueDestination(collisionRoot, "photo.jpg")
+            assertEquals("photo (1).jpg", nextFile.name)
+            nextFile.writeText("second")
+            val thirdFile = com.linkme.androidbridge.service.FileTransferManager.resolveUniqueDestination(collisionRoot, "photo.jpg")
+            assertEquals("photo (2).jpg", thirdFile.name)
+        } finally {
+            collisionRoot.deleteRecursively()
+        }
+
+        val testTrustStore = TrustStore()
+        testTrustStore.savePeer(
+            TrustedPeer(
+                deviceId = "peer-unpair-1",
+                deviceName = "MacBook Air",
+                pinnedCertSha256 = "a".repeat(64),
+                sharedBleSecret = ByteArray(32) { 0x11 },
+                bluetoothSessionKey = ByteArray(32) { 0x22 }
+            )
+        )
+        assertEquals(1, testTrustStore.allPeers().size)
+        testTrustStore.removePeer("peer-unpair-1")
+        var unpairHookCalled = false
+        com.linkme.androidbridge.service.BridgeActivityHub.onUnpairAllRequested = { unpairHookCalled = true }
+        com.linkme.androidbridge.service.BridgeActivityHub.notifyUnpaired()
+        com.linkme.androidbridge.service.BridgeActivityHub.onUnpairAllRequested = null
+        assertTrue(unpairHookCalled)
+        assertEquals(0, testTrustStore.allPeers().size)
+        assertNull(com.linkme.androidbridge.service.BridgeActivityHub.peerDeviceName.value)
     }
 }

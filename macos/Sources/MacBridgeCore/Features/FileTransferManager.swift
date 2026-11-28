@@ -237,11 +237,36 @@ public actor FileTransferManager {
             )
         }
 
-        if FileManager.default.fileExists(atPath: state.finalURL.path) {
-            try FileManager.default.removeItem(at: state.finalURL)
+        let resolvedFinalURL = Self.resolveUniqueDestination(
+            directory: state.finalURL.deletingLastPathComponent(),
+            filename: state.finalURL.lastPathComponent
+        )
+        try FileManager.default.moveItem(at: state.partURL, to: resolvedFinalURL)
+        return resolvedFinalURL
+    }
+
+    public static func resolveUniqueDestination(
+        directory: URL,
+        filename: String,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> URL {
+        let initial = directory.appendingPathComponent(filename)
+        if !fileExists(initial.path) {
+            return initial
         }
-        try FileManager.default.moveItem(at: state.partURL, to: state.finalURL)
-        return state.finalURL
+        let ext = (filename as NSString).pathExtension
+        let stem = (filename as NSString).deletingPathExtension
+        for index in 1...9999 {
+            let candidateName = ext.isEmpty ? "\(stem) (\(index))" : "\(stem) (\(index)).\(ext)"
+            let candidate = directory.appendingPathComponent(candidateName)
+            if !fileExists(candidate.path) {
+                return candidate
+            }
+        }
+        let fallback = ext.isEmpty
+            ? "\(stem)-\(UUID().uuidString.prefix(8))"
+            : "\(stem)-\(UUID().uuidString.prefix(8)).\(ext)"
+        return directory.appendingPathComponent(fallback)
     }
 
     public static func streamingSha256Hex(fileURL: URL) throws -> String {

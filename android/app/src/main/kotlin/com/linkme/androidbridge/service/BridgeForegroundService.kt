@@ -166,6 +166,7 @@ class BridgeForegroundService : Service() {
         BridgeActivityHub.onStartPairingExchange = null
         BridgeActivityHub.onSendDeviceCommand = null
         BridgeActivityHub.onPeerTrustedUpdated = null
+        BridgeActivityHub.onUnpairAllRequested = null
         BridgeActivityHub.onRequestRemoteScreenMirror = null
         BridgeActivityHub.onSendScreenFrameBytes = null
         BridgeActivityHub.onSendPing01 = null
@@ -592,6 +593,14 @@ class BridgeForegroundService : Service() {
                     gattClient.startScanning(autoReconnect = true)
                     startNsdLanDiscovery()
                     emitImmediateTelemetry()
+                }
+            }
+
+            BridgeActivityHub.onUnpairAllRequested = {
+                serviceScope.launch {
+                    runCatching { stopWifiTransport() }
+                    runCatching { gattClient.stopScanning() }
+                    runCatching { peripheral.switchToTrustedBeacon(null) }
                 }
             }
 

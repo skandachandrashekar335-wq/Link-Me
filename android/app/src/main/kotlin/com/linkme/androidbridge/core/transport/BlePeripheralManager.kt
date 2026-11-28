@@ -39,6 +39,44 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
+object BleAdvertisementBudget {
+    const val MAX_LEGACY_ADV_BYTES = 31
+    const val FLAGS_FIELD_BYTES = 3
+    const val SERVICE_UUID_128_FIELD_BYTES = 18 // 2B AD header + 16B UUID
+
+    fun serviceDataFieldBytes(payloadLength: Int): Int {
+        require(payloadLength >= 0) { "payloadLength must be >= 0" }
+        return 2 + 16 + payloadLength
+    }
+
+    fun primaryAdvertisementBytes(
+        includeServiceUuid: Boolean,
+        serviceDataPayloadLength: Int?,
+        connectable: Boolean = true
+    ): Int {
+        var total = if (connectable) FLAGS_FIELD_BYTES else 0
+        if (includeServiceUuid) {
+            total += SERVICE_UUID_128_FIELD_BYTES
+        }
+        if (serviceDataPayloadLength != null) {
+            total += serviceDataFieldBytes(serviceDataPayloadLength)
+        }
+        return total
+    }
+
+    fun scanResponseBytes(includeServiceUuid: Boolean = true): Int =
+        if (includeServiceUuid) SERVICE_UUID_128_FIELD_BYTES else 0
+
+    fun errorDescription(errorCode: Int): String = when (errorCode) {
+        AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE -> "DATA_TOO_LARGE (code=1)"
+        AdvertiseCallback.ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "TOO_MANY_ADVERTISERS (code=2)"
+        AdvertiseCallback.ADVERTISE_FAILED_ALREADY_STARTED -> "ALREADY_STARTED (code=3)"
+        AdvertiseCallback.ADVERTISE_FAILED_INTERNAL_ERROR -> "INTERNAL_ERROR (code=4)"
+        AdvertiseCallback.ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> "FEATURE_UNSUPPORTED (code=5)"
+        else -> "UNKNOWN (code=$errorCode)"
+    }
+}
+
 object BleFrameChunker {
     fun chunk(frameData: ByteArray, mtu: Int = 23): List<ByteArray> {
         val maxChunk = maxOf(1, mtu - 3)
@@ -132,27 +170,42 @@ class BlePeripheralManager(
             .setConnectable(true)
             .build()
 
+        val primaryBytes = BleAdvertisementBudget.primaryAdvertisementBytes(
+            includeServiceUuid = false,
+            serviceDataPayloadLength = tokenTag.size,
+            connectable = true
+        )
+        check(primaryBytes <= BleAdvertisementBudget.MAX_LEGACY_ADV_BYTES) {
+            "Pairing ADV packet ($primaryBytes B) exceeds legacy 31B limit"
+        }
+
+        // Primary ADV carries Flags (3B) + 128-bit ServiceData (22B) = 25B <= 31B cap.
+        // ServiceUUID (18B) lives in ScanResponse so active scanners receive both without DATA_TOO_LARGE.
         val data = AdvertiseData.Builder()
-            .addServiceUuid(ParcelUuid(SERVICE_UUID))
             .addServiceData(ParcelUuid(SERVICE_UUID), tokenTag)
+            .setIncludeDeviceName(false)
+            .build()
+
+        val scanResponse = AdvertiseData.Builder()
+            .addServiceUuid(ParcelUuid(SERVICE_UUID))
             .setIncludeDeviceName(false)
             .build()
 
         val tagHex = tokenTag.joinToString("") { "%02x".format(it) }
         val callback = object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-                onDiagnosticEvent?.invoke("BLE_PAIR_ADV_START(tag=$tagHex)")
+                onDiagnosticEvent?.invoke("BLE_PAIR_ADV_START(tag=$tagHex,bytes=$primaryBytes)")
                 onAdvertiseStatusChanged?.invoke(true, "Advertising BLE (tag=$tagHex)")
             }
 
             override fun onStartFailure(errorCode: Int) {
-                val msg = "BLE Advertise Failed (code=$errorCode)"
+                val msg = "BLE Advertise Failed: ${BleAdvertisementBudget.errorDescription(errorCode)}"
                 onDiagnosticEvent?.invoke("PAIR_ADV_ERROR($msg)")
                 onAdvertiseStatusChanged?.invoke(false, msg)
             }
         }
         advertiseCallback = callback
-        runCatching { advertiser.startAdvertising(settings, data, callback) }
+        runCatching { advertiser.startAdvertising(settings, data, scanResponse, callback) }
             .onFailure { err ->
                 val msg = "BLE Adv Exception: ${err.message ?: "Permission denied"}"
                 onDiagnosticEvent?.invoke("PAIR_ADV_ERROR($msg)")
@@ -333,15 +386,29 @@ class BlePeripheralManager(
             .setConnectable(true)
             .build()
 
+        val token = privacyBeacon.token()
+        // Primary ADV carries Flags (3B) + 8-byte ServiceData (26B) = 29B <= 31B cap.
+        // ServiceUUID (18B) lives in ScanResponse.
         val data = AdvertiseData.Builder()
-            .addServiceUuid(ParcelUuid(SERVICE_UUID))
-            .addServiceData(ParcelUuid(SERVICE_UUID), privacyBeacon.token())
+            .addServiceData(ParcelUuid(SERVICE_UUID), token)
             .setIncludeDeviceName(false)
             .build()
 
-        val callback = object : AdvertiseCallback() {}
+        val scanResponse = AdvertiseData.Builder()
+            .addServiceUuid(ParcelUuid(SERVICE_UUID))
+            .setIncludeDeviceName(false)
+            .build()
+
+        val callback = object : AdvertiseCallback() {
+            override fun onStartFailure(errorCode: Int) {
+                onDiagnosticEvent?.invoke("BEACON_ADV_ERROR(${BleAdvertisementBudget.errorDescription(errorCode)})")
+            }
+        }
         advertiseCallback = callback
-        advertiser.startAdvertising(settings, data, callback)
+        runCatching { advertiser.startAdvertising(settings, data, scanResponse, callback) }
+            .onFailure { err ->
+                onDiagnosticEvent?.invoke("BEACON_ADV_ERROR(${err.message ?: "Exception"})")
+            }
     }
 
     @SuppressLint("MissingPermission")

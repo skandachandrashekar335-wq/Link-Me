@@ -298,6 +298,7 @@ class MainActivity : ComponentActivity() {
                             val store = trustStore ?: return@launch
                             store.allPeers().forEach { store.removePeer(it.deviceId) }
                             withContext(Dispatchers.Main) {
+                                BridgeActivityHub.notifyUnpaired()
                                 isPaired = false
                                 pairedPeerName = "No Mac Paired"
                                 pairedPeerFingerprint = ""
@@ -369,7 +370,7 @@ class MainActivity : ComponentActivity() {
                                 "AndroidBridge keeps Notification Listener permission out of the main APK so Play Protect installs cleanly.\n\n" +
                                     "To enable notification mirroring:\n" +
                                     "1. Double-click Install-on-Android.command in MacBridge.dmg over USB, OR\n" +
-                                    "2. Run: adb install -r -g AndroidBridge-NotifyAddon-v2.1.0.apk\n" +
+                                    "2. Run: adb install -r -g AndroidBridge-NotifyAddon-v2.1.1.apk\n" +
                                     "3. Grant Restricted Settings -> Notification Access to Link-Me Notify Add-on.",
                                 fontSize = 13.sp,
                                 fontFamily = FontFamily.Default

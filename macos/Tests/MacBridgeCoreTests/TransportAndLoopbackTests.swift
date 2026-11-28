@@ -1,4 +1,5 @@
 import AppKit
+import CoreBluetooth
 import CryptoKit
 import Foundation
 import Testing
@@ -856,5 +857,33 @@ struct TransportAndLoopbackTests {
         #expect(trustedAndroid.deviceName == "SM-A736B" && finalAck.accepted)
         #expect(try invMacTrust.allPeers().first?.deviceId == "33333333-3333-4333-8333-333333333333")
         #expect(try invAndroidTrust.allPeers().first?.deviceId == macHello.deviceId)
+
+        // 8. v2.1.1 Audit regressions: Overflow ServiceUUID match, Tab keyCode 48, collision-safe filenames, TrustStore unpair
+        #expect(
+            BleCentralManager.advertisementContainsLinkMeServiceUUID([
+                CBAdvertisementDataOverflowServiceUUIDsKey: [BleCentralManager.serviceUUID]
+            ])
+        )
+        let tabOutcome = MirrorInputTranslator.translateKeyDown(
+            keyCode: 48,
+            characters: "\t",
+            charactersIgnoringModifiers: "\t",
+            modifierFlags: []
+        )
+        #expect(tabOutcome == .remoteInput(.key("tab")))
+
+        let collisionDir = FileManager.default.temporaryDirectory.appendingPathComponent("linkme-audit-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: collisionDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: collisionDir) }
+        #expect(try FilenameSanitizer.validateStrict("report (final).pdf") == "report (final).pdf")
+        try Data("first".utf8).write(to: collisionDir.appendingPathComponent("photo.jpg"))
+        let uniqueSecond = FileTransferManager.resolveUniqueDestination(directory: collisionDir, filename: "photo.jpg")
+        #expect(uniqueSecond.lastPathComponent == "photo (1).jpg")
+        try Data("second".utf8).write(to: uniqueSecond)
+        let uniqueThird = FileTransferManager.resolveUniqueDestination(directory: collisionDir, filename: "photo.jpg")
+        #expect(uniqueThird.lastPathComponent == "photo (2).jpg")
+
+        try invMacTrust.removePeer(deviceId: "33333333-3333-4333-8333-333333333333")
+        #expect(try invMacTrust.allPeers().isEmpty)
     }
 }

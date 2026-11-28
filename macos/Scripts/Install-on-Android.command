@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="v2.1.0"
+VERSION="v2.1.1"
 RELEASE_BASE="https://github.com/skandachandrashekar335-wq/Link-Me/releases/download/${VERSION}"
 CORE_APK="AndroidBridge-${VERSION}.apk"
 ADDON_APK="AndroidBridge-NotifyAddon-${VERSION}.apk"
@@ -41,15 +41,29 @@ resolve_apk() {
 CORE_PATH="$(resolve_apk "$CORE_APK")"
 ADDON_PATH="$(resolve_apk "$ADDON_APK")"
 
-echo "Waiting for USB-connected Android device (USB Debugging enabled)..."
-"$ADB_BIN" wait-for-device
+echo "Checking USB-connected Android device (USB Debugging enabled)..."
+DEVICE_SERIALS=()
+while IFS= read -r serial; do
+  [ -n "$serial" ] && DEVICE_SERIALS+=("$serial")
+done < <("$ADB_BIN" devices | awk 'NR>1 && $2=="device" {print $1}')
+
+if [ "${#DEVICE_SERIALS[@]}" -eq 0 ]; then
+  echo "Waiting for Android device..."
+  "$ADB_BIN" wait-for-device
+  while IFS= read -r serial; do
+    [ -n "$serial" ] && DEVICE_SERIALS+=("$serial")
+  done < <("$ADB_BIN" devices | awk 'NR>1 && $2=="device" {print $1}')
+fi
+
 "$ADB_BIN" devices
 
-echo "Installing ${CORE_APK} (bypasses Play Protect prompts over USB)..."
-"$ADB_BIN" install -r -g "$CORE_PATH" || "$ADB_BIN" install -r "$CORE_PATH"
+for SERIAL in "${DEVICE_SERIALS[@]}"; do
+  echo "Installing ${CORE_APK} on ${SERIAL} (bypasses Play Protect prompts over USB)..."
+  "$ADB_BIN" -s "$SERIAL" install -r -g "$CORE_PATH" || "$ADB_BIN" -s "$SERIAL" install -r "$CORE_PATH"
 
-echo "Installing ${ADDON_APK}..."
-"$ADB_BIN" install -r -g "$ADDON_PATH" || "$ADB_BIN" install -r "$ADDON_PATH"
+  echo "Installing ${ADDON_APK} on ${SERIAL}..."
+  "$ADB_BIN" -s "$SERIAL" install -r -g "$ADDON_PATH" || "$ADB_BIN" -s "$SERIAL" install -r "$ADDON_PATH"
+done
 
 echo ""
 echo "==========================================================="

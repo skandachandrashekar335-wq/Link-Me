@@ -70,6 +70,15 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
         return ConstantTime.equals(expected, actual)
     }
 
+    public static func advertisementContainsLinkMeServiceUUID(_ advertisementData: [String: Any]) -> Bool {
+        let direct = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
+        if direct.contains(Self.serviceUUID) {
+            return true
+        }
+        let overflow = (advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID]) ?? []
+        return overflow.contains(Self.serviceUUID)
+    }
+
     public func startPairingDiscovery(
         pairToken: String,
         helloBuilder: @escaping @Sendable () -> WireFrame?
@@ -268,17 +277,21 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
         advertisementData: [String: Any],
         rssi RSSI: NSNumber
     ) {
-        if let pairToken = activePairingToken,
-           let serviceData = advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data],
-           Self.matchesPairingServiceData(serviceData, pairToken: pairToken) {
-            isPairingConnection = true
-            connectedPeripheral = peripheral
-            peripheral.delegate = self
-            onPairingStepChanged?(2, "BLE Peripheral Linked (RSSI \(RSSI) dBm)")
-            onDiagnosticEvent?("PAIR_PERIPHERAL_FOUND(rssi=\(RSSI))")
-            central.stopScan()
-            central.connect(peripheral, options: nil)
-            return
+        if let pairToken = activePairingToken {
+            if let serviceData = advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data],
+               Self.matchesPairingServiceData(serviceData, pairToken: pairToken) {
+                isPairingConnection = true
+                connectedPeripheral = peripheral
+                peripheral.delegate = self
+                onPairingStepChanged?(2, "BLE Peripheral Linked (RSSI \(RSSI) dBm)")
+                onDiagnosticEvent?("PAIR_PERIPHERAL_FOUND(rssi=\(RSSI))")
+                central.stopScan()
+                central.connect(peripheral, options: nil)
+                return
+            }
+            if Self.advertisementContainsLinkMeServiceUUID(advertisementData) {
+                onDiagnosticEvent?("PAIR_SERVICE_UUID_SEEN_WITHOUT_TAG(rssi=\(RSSI))")
+            }
         }
 
         guard let peers = try? trustStore.allPeers(), !peers.isEmpty else { return }

@@ -121,6 +121,8 @@ public enum MirrorInputTranslator {
         switch keyCode {
         case 36, 76: // Return or Numpad Enter
             return .remoteInput(.key("enter"))
+        case 48: // Tab
+            return .remoteInput(.key("tab"))
         case 51: // Delete / Backspace
             return .remoteInput(.key("backspace"))
         case 53: // Escape

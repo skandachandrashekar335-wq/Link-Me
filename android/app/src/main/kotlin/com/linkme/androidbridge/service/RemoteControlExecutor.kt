@@ -74,6 +74,7 @@ object ShizukuInputCommandBuilder {
             "text" -> {
                 val raw = payload.text?.takeIf { it.isNotEmpty() } ?: return null
                 val sanitized = sanitizeForInputText(raw)
+                if (sanitized.isEmpty()) return null
                 val singleQuoted = sanitized.replace("'", "'\\''")
                 "input text '$singleQuoted'"
             }
@@ -87,7 +88,8 @@ object ShizukuInputCommandBuilder {
         for (ch in raw) {
             when {
                 ch == ' ' -> sb.append("%s")
-                ch == '\n' || ch == '\r' || ch == '\t' || ch.code < 0x20 -> Unit
+                // Android shell `input text` only resolves printable US-ASCII via KeyCharacterMap.
+                ch.code < 0x20 || ch.code > 0x7E -> Unit
                 else -> sb.append(ch)
             }
         }
@@ -166,7 +168,13 @@ object RemoteControlExecutor {
                     String::class.java
                 ).apply { isAccessible = true }
                 val proc = newProcMethod.invoke(null, arrayOf("sh", "-c", shellCmd), null, null) as Process
-                proc.waitFor()
+                val exit = proc.waitFor()
+                if (exit != 0) {
+                    val errText = runCatching { proc.errorStream.bufferedReader().readText().trim() }.getOrDefault("")
+                    BridgeActivityHub.appendWireEvent("SHIZUKU_EXEC_FAIL(exit=$exit${if (errText.isNotEmpty()) ",err=$errText" else ""})")
+                }
+            }.onFailure { err ->
+                BridgeActivityHub.appendWireEvent("SHIZUKU_EXEC_ERR(${err.message ?: "unknown"})")
             }
         }
         return CursorControlStatus.SHIZUKU_ACTIVE

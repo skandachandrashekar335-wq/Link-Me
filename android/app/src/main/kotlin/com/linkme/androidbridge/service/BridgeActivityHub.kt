@@ -197,6 +197,9 @@ object BridgeActivityHub {
     var onPeerTrustedUpdated: (() -> Unit)? = null
 
     @Volatile
+    var onUnpairAllRequested: (() -> Unit)? = null
+
+    @Volatile
     var onRequestRemoteScreenMirror: ((start: Boolean, fps: Int, quality: Int) -> Unit)? = null
 
     @Volatile
@@ -316,6 +319,20 @@ object BridgeActivityHub {
         pendingAutoCommit = null
         _pairingStatus.value = PairingCommitStatus.Idle
         _pairingTrace.value = PairingTraceState()
+    }
+
+    fun notifyUnpaired() {
+        resetPairingStatus()
+        _peerDeviceName.value = null
+        _peerBatteryPercent.value = null
+        _peerIsCharging.value = false
+        _bluetoothConnected.value = false
+        _wifiConnected.value = false
+        _latencyMs.value = null
+        _bridgeState.value = BridgeState.DORMANT_BLE
+        _pendingFileOffer.value = null
+        appendWireEvent("UNPAIR_ALL_CLEARED")
+        onUnpairAllRequested?.invoke()
     }
 
     fun updateRadioDiagnostics(

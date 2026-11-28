@@ -1379,18 +1379,33 @@ final class BridgeDashboardViewModel: ObservableObject {
         for peer in peers {
             try? trustStore.removePeer(deviceId: peer.deviceId)
         }
+        bleCentralManager?.stopPairingDiscovery()
         bleCentralManager?.stopScanning()
+        blePeripheralManager?.stop()
+        wifiTlsClient?.close()
+        wifiTlsClient = nil
+        mirrorWindowController?.closeMirrorWindow()
         peerPaired = false
         peerName = "No Device Paired"
         peerDeviceId = ""
         peerCertFingerprint = ""
+        peerBatteryPercent = nil
+        peerIsCharging = false
+        wifiMtlsStatus = "Standby"
+        isBluetoothConnected = false
+        bridgeState = .dormantBle
         latencyMs = nil
+        pendingApproval = nil
+        Task {
+            await clipboardManager.setPeerReachable(false)
+            await refreshPairingSession()
+        }
         statusBanner = "Unpaired all devices"
         appendActivity(
             BridgeActivityRecord(
                 category: .system,
                 title: "Devices Unpaired",
-                detail: "TrustStore cleared",
+                detail: "TrustStore & active sockets cleared",
                 badgeText: "Reset"
             )
         )

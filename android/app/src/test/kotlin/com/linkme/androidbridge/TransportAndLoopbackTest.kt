@@ -912,6 +912,6 @@ class TransportAndLoopbackTest {
         com.linkme.androidbridge.service.BridgeActivityHub.onUnpairAllRequested = null
         assertTrue(unpairHookCalled)
         assertEquals(0, testTrustStore.allPeers().size)
-        assertNull(com.linkme.androidbridge.service.BridgeActivityHub.peerDeviceName.value)
+        org.junit.Assert.assertNull(com.linkme.androidbridge.service.BridgeActivityHub.peerDeviceName.value)
     }
 }

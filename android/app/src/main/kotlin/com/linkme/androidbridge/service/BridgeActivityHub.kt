@@ -329,7 +329,6 @@ object BridgeActivityHub {
         _bluetoothConnected.value = false
         _wifiConnected.value = false
         _latencyMs.value = null
-        _bridgeState.value = BridgeState.DORMANT_BLE
         _pendingFileOffer.value = null
         appendWireEvent("UNPAIR_ALL_CLEARED")
         onUnpairAllRequested?.invoke()

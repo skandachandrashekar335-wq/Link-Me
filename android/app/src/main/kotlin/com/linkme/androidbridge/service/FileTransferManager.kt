@@ -217,7 +217,7 @@ class FileTransferManager(
             throw FileTransferException("Final SHA-256 mismatch: expected=${state.offer.sha256}, actual=$actualHex")
         }
 
-        val resolvedFinal = resolveUniqueDestination(state.finalFile.parentFile ?: receiveDir, state.finalFile.name)
+        val resolvedFinal = resolveUniqueDestination(state.finalFile.parentFile ?: stagingRoot, state.finalFile.name)
         if (!state.partFile.renameTo(resolvedFinal)) {
             state.partFile.delete()
             throw FileTransferException("Failed to rename .part file")

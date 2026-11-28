@@ -885,5 +885,15 @@ struct TransportAndLoopbackTests {
 
         try invMacTrust.removePeer(deviceId: "33333333-3333-4333-8333-333333333333")
         #expect(try invMacTrust.allPeers().isEmpty)
+
+        // 9. v2.1.2 BLE CoreBluetooth ATT MTU calculation + live pairing TCP listener port reuse
+        #expect(BleCentralManager.effectiveWriteMtu(withoutResponseLimit: 20) == 23)
+        #expect(BleCentralManager.effectiveWriteMtu(withoutResponseLimit: 182) == 185)
+        #expect(BleCentralManager.effectiveWriteMtu(withoutResponseLimit: 700) == 512)
+
+        let port1 = try await invPairing.ensureTemporaryListener(onReadyPort: { _ in })
+        let port2 = try await invPairing.ensureTemporaryListener(onReadyPort: { _ in })
+        #expect(port1 > 0 && port1 == port2)
+        await invPairing.rejectPairing()
     }
 }

@@ -204,6 +204,50 @@ public actor PairingFeature {
         listener = nil
     }
 
+    public func ensureTemporaryListener(
+        parameters: NWParameters = .tcp,
+        onReadyPort: @escaping @Sendable (UInt16) -> Void,
+        onPairHelloReceived: (@Sendable (PairHelloPayload) -> Void)? = nil,
+        onPairCommitReceived: (@Sendable (PairCommitPayload) async -> PairAckPayload?)? = nil
+    ) async throws -> UInt16 {
+        if listener != nil, activeListeningPort > 0 {
+            onReadyPort(activeListeningPort)
+            return activeListeningPort
+        }
+        final class OnceBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            private let continuation: CheckedContinuation<UInt16, Error>
+            init(_ continuation: CheckedContinuation<UInt16, Error>) { self.continuation = continuation }
+            func resume(_ result: Result<UInt16, Error>) {
+                let shouldResume = lock.withLock { () -> Bool in
+                    guard !done else { return false }
+                    done = true
+                    return true
+                }
+                if shouldResume {
+                    continuation.resume(with: result)
+                }
+            }
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            let box = OnceBox(continuation)
+            do {
+                try startTemporaryListener(
+                    parameters: parameters,
+                    onReadyPort: { port in
+                        onReadyPort(port)
+                        box.resume(.success(port))
+                    },
+                    onPairHelloReceived: onPairHelloReceived,
+                    onPairCommitReceived: onPairCommitReceived
+                )
+            } catch {
+                box.resume(.failure(error))
+            }
+        }
+    }
+
     public func startTemporaryListener(
         parameters: NWParameters = .tcp,
         onReadyPort: @escaping @Sendable (UInt16) -> Void,

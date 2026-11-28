@@ -388,14 +388,11 @@ final class BridgeDashboardViewModel: ObservableObject {
             guard let self else { return }
             await self.applyPreferencesSnapshot(self.preferences.snapshot)
             await self.clipboardManager.setPeerReachable(self.peerPaired)
-            try? await self.pairingFeature.startTemporaryListener(
+            if let boundPort = try? await self.pairingFeature.ensureTemporaryListener(
                 onReadyPort: { [weak self] port in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
                         self.localListeningPort = port
-                        if !self.peerPaired {
-                            await self.refreshPairingSession()
-                        }
                     }
                 },
                 onPairHelloReceived: { [weak self] hello in
@@ -407,7 +404,9 @@ final class BridgeDashboardViewModel: ObservableObject {
                     guard let self else { return nil }
                     return await self.confirmPeerFromCommit(commit)
                 }
-            )
+            ) {
+                self.localListeningPort = boundPort
+            }
             await self.refreshPairingSession()
             self.startTelemetryTimer()
 
@@ -1288,7 +1287,7 @@ final class BridgeDashboardViewModel: ObservableObject {
 
     func refreshPairingSession() async {
         do {
-            try? await pairingFeature.startTemporaryListener(
+            if let boundPort = try? await pairingFeature.ensureTemporaryListener(
                 onReadyPort: { [weak self] port in
                     Task { @MainActor [weak self] in
                         self?.localListeningPort = port
@@ -1303,7 +1302,9 @@ final class BridgeDashboardViewModel: ObservableObject {
                     guard let self else { return nil }
                     return await self.confirmPeerFromCommit(commit)
                 }
-            )
+            ) {
+                localListeningPort = boundPort
+            }
             let (uri, expires) = try await pairingFeature.beginPairingSession(
                 tcpPort: localListeningPort,
                 deviceName: preferences.normalizedAlias

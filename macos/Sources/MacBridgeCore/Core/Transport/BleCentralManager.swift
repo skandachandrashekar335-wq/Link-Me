@@ -28,6 +28,7 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
 
     private let trustStore: TrustStore
     private let queue = DispatchQueue(label: "com.linkme.macbridge.ble.central")
+    private let txQueue = DispatchQueue(label: "com.linkme.macbridge.ble.central.tx")
     private var centralManager: CBCentralManager?
     private var connectedPeripheral: CBPeripheral?
     private var activePeer: TrustedPeer?
@@ -169,14 +170,39 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
         }
     }
 
+    public static func effectiveWriteMtu(withoutResponseLimit: Int) -> Int {
+        // On CoreBluetooth, maximumWriteValueLength(for: .withResponse) returns 512 regardless of ATT MTU,
+        // forcing GATT Prepare/Execute Writes. `.withoutResponse` reflects actual (ATT_MTU - 3).
+        min(512, max(23, withoutResponseLimit + 3))
+    }
+
     public func sendControlFrame(_ frame: WireFrame) {
-        queue.async { [weak self] in
+        // Dispatch to dedicated txQueue so blocking semaphore waits NEVER freeze CoreBluetooth's delegate queue.
+        txQueue.async { [weak self] in
             guard let self else { return }
+
+            let snapshot: (
+                peer: TrustedPeer?,
+                l2capOut: OutputStream?,
+                peripheral: CBPeripheral?,
+                writeChar: CBCharacteristic?,
+                pid: UInt32
+            ) = self.queue.sync {
+                let id = self.packetSeq
+                self.packetSeq &+= 1
+                return (
+                    self.activePeer,
+                    self.activeL2CapChannel?.outputStream,
+                    self.connectedPeripheral,
+                    self.writeCharacteristic,
+                    id
+                )
+            }
 
             let isHandshake = frame.messageType == .pairHello || frame.messageType == .pairCommit || frame.messageType == .pairAck
             let envelope: Data
             if !isHandshake,
-               let peer = self.activePeer,
+               let peer = snapshot.peer,
                let cipher = try? BluetoothSessionCipher(sessionKey: peer.bluetoothSessionKey, senderTag: "MAC0"),
                let sealed = try? cipher.seal(frame: frame) {
                 envelope = sealed
@@ -184,20 +210,21 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
                 envelope = FrameEncoder.encode(frame)
             }
 
-            if let outStream = self.activeL2CapChannel?.outputStream,
+            if let outStream = snapshot.l2capOut,
                BluetoothL2CapStreamFramer.writeFramed(envelope, to: outStream) {
                 return
             }
 
-            guard let peripheral = self.connectedPeripheral,
-                  let char = self.writeCharacteristic else {
+            guard let peripheral = snapshot.peripheral,
+                  let char = snapshot.writeChar else {
+                self.onDiagnosticEvent?("BLE_TX_DROPPED_NO_GATT_CHAR(type=\(frame.messageType.rawValue))")
                 return
             }
 
-            let packets = BluetoothPacketCodec.packetize(envelope: envelope, packetId: self.packetSeq, mtu: min(512, max(23, peripheral.maximumWriteValueLength(for: .withResponse) + 3)))
-            let pid = self.packetSeq
-            self.packetSeq &+= 1
-            let writeType: CBCharacteristicWriteType = (packets.count <= 2 && char.properties.contains(.writeWithoutResponse))
+            let attMtu = Self.effectiveWriteMtu(withoutResponseLimit: peripheral.maximumWriteValueLength(for: .withoutResponse))
+            let packets = BluetoothPacketCodec.packetize(envelope: envelope, packetId: snapshot.pid, mtu: attMtu)
+            let pid = snapshot.pid
+            let writeType: CBCharacteristicWriteType = (packets.count <= 1 && char.properties.contains(.writeWithoutResponse))
                 ? .withoutResponse
                 : .withResponse
 
@@ -209,16 +236,26 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
                 if writeType == .withResponse {
                     let writeSem = DispatchSemaphore(value: 0)
                     self.writeLock.withLock { self.characteristicWriteSem = writeSem }
-                    peripheral.writeValue(pkt, for: char, type: .withResponse)
-                    _ = writeSem.wait(timeout: .now() + .milliseconds(1500))
+                    self.queue.async {
+                        peripheral.writeValue(pkt, for: char, type: .withResponse)
+                    }
+                    let waited = writeSem.wait(timeout: .now() + .milliseconds(1500))
                     self.writeLock.withLock { self.characteristicWriteSem = nil }
+                    if waited == .timedOut {
+                        self.onDiagnosticEvent?("BLE_WRITE_TIMEOUT(pid=\(pid))")
+                    }
                 } else {
-                    peripheral.writeValue(pkt, for: char, type: .withoutResponse)
+                    self.queue.async {
+                        peripheral.writeValue(pkt, for: char, type: .withoutResponse)
+                    }
                 }
             }
             if let sem {
-                _ = sem.wait(timeout: .now() + .milliseconds(1200))
+                let ackResult = sem.wait(timeout: .now() + .milliseconds(1200))
                 self.ackLock.withLock { _ = self.ackWaiters.removeValue(forKey: pid) }
+                if ackResult == .timedOut {
+                    self.onDiagnosticEvent?("BLE_ACK_TIMEOUT(pid=\(pid),chunks=\(packets.count))")
+                }
             }
         }
     }

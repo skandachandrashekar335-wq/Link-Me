@@ -781,7 +781,9 @@ struct BridgeStudioWindow: View {
                             .foregroundStyle(viewModel.pendingApproval != nil ? pal.onSurface : pal.secondaryText)
                         Text(viewModel.pendingApproval != nil
                             ? "SHA-256 Pin Ready • Peer: \(viewModel.pendingApproval!.peerDeviceName)"
-                            : "Waiting for Android PAIR_HELLO over Bluetooth or LAN...")
+                            : (viewModel.pairingStep >= 2
+                                ? viewModel.pairingStepMessage
+                                : "Scan QR on AndroidBridge — awaiting PAIR_COMMIT over BLE or LAN..."))
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(viewModel.pendingApproval != nil ? pal.secondaryAccent : pal.secondaryText)
                     }

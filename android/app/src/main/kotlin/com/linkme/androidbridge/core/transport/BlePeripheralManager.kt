@@ -29,11 +29,14 @@ import com.linkme.androidbridge.core.protocol.WireFrame
 import com.linkme.androidbridge.core.protocol.WireMessageType
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -106,12 +109,16 @@ class BlePeripheralManager(
     private val onAdvertiseStatusChanged: ((Boolean, String) -> Unit)? = null
 ) {
     private val scheduler = Executors.newSingleThreadScheduledExecutor()
+    private val notifyExecutor = Executors.newSingleThreadExecutor()
     private val l2capExecutor = Executors.newCachedThreadPool()
     private val frameDecoder = FrameDecoder()
     private val reassembler = BluetoothPacketReassembler()
     private val replayGuard = ReplayGuard()
     private val packetSeq = AtomicLong(1L)
     private val json = Json { ignoreUnknownKeys = true }
+    private val preparedWrites = ConcurrentHashMap<String, ByteArrayOutputStream>()
+    @Volatile private var pendingNotifyLatch: CountDownLatch? = null
+    @Volatile private var pendingNotifyStatus: Int = BluetoothGatt.GATT_FAILURE
 
     private var advertiseCallback: AdvertiseCallback? = null
     private var rotationFuture: ScheduledFuture<*>? = null
@@ -262,7 +269,9 @@ class BlePeripheralManager(
         l2capServerSocket = null
         gattServer?.close()
         gattServer = null
+        pendingNotifyLatch?.countDown()
         scheduler.shutdownNow()
+        notifyExecutor.shutdownNow()
         l2capExecutor.shutdownNow()
     }
 
@@ -289,10 +298,36 @@ class BlePeripheralManager(
         val device = connectedDevice ?: return false
         val characteristic = notifyCharacteristic ?: return false
         val pid = packetSeq.getAndIncrement()
-        for (packet in BluetoothPacketCodec.packetize(envelope, pid, negotiatedMtu)) {
-            notifyBytes(server, device, characteristic, packet)
+        val packets = BluetoothPacketCodec.packetize(envelope, pid, negotiatedMtu)
+        notifyExecutor.submit {
+            for (packet in packets) {
+                sendSingleNotificationAndWait(server, device, characteristic, packet)
+            }
         }
         return true
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun sendSingleNotificationAndWait(
+        server: BluetoothGattServer,
+        device: BluetoothDevice,
+        characteristic: BluetoothGattCharacteristic,
+        value: ByteArray
+    ) {
+        val latch = CountDownLatch(1)
+        pendingNotifyStatus = BluetoothGatt.GATT_FAILURE
+        pendingNotifyLatch = latch
+        val initiated = notifyBytes(server, device, characteristic, value)
+        if (!initiated) {
+            pendingNotifyLatch = null
+            onDiagnosticEvent?.invoke("GATT_SERVER_NOTIFY_INIT_FAILED(len=${value.size})")
+            return
+        }
+        val completed = latch.await(1500L, TimeUnit.MILLISECONDS)
+        pendingNotifyLatch = null
+        if (!completed || pendingNotifyStatus != BluetoothGatt.GATT_SUCCESS) {
+            onDiagnosticEvent?.invoke("GATT_SERVER_NOTIFY_WAIT(ok=$completed,status=$pendingNotifyStatus)")
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -301,15 +336,18 @@ class BlePeripheralManager(
         device: BluetoothDevice,
         characteristic: BluetoothGattCharacteristic,
         value: ByteArray
-    ) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            server.notifyCharacteristicChanged(device, characteristic, false, value)
-        } else {
-            @Suppress("DEPRECATION")
-            characteristic.value = value
-            @Suppress("DEPRECATION")
-            server.notifyCharacteristicChanged(device, characteristic, false)
-        }
+    ): Boolean {
+        return runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                server.notifyCharacteristicChanged(device, characteristic, false, value) ==
+                    android.bluetooth.BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                characteristic.value = value
+                @Suppress("DEPRECATION")
+                server.notifyCharacteristicChanged(device, characteristic, false)
+            }
+        }.getOrDefault(false)
     }
 
     private fun encodeOutgoingEnvelope(frame: WireFrame): ByteArray {
@@ -465,6 +503,20 @@ class BlePeripheralManager(
                 }
             }
 
+            override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+                pendingNotifyStatus = status
+                pendingNotifyLatch?.countDown()
+            }
+
+            override fun onExecuteWrite(device: BluetoothDevice, requestId: Int, execute: Boolean) {
+                val staged = preparedWrites.remove(device.address)
+                if (execute && staged != null) {
+                    val assembled = staged.toByteArray()
+                    runCatching { dispatchCharacteristicWritePayload(device, assembled) }
+                }
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+            }
+
             override fun onCharacteristicWriteRequest(
                 device: BluetoothDevice,
                 requestId: Int,
@@ -475,28 +527,17 @@ class BlePeripheralManager(
                 value: ByteArray
             ) {
                 if (characteristic.uuid == CONTROL_WRITE_CHAR_UUID) {
-                    try {
-                        if (value.isNotEmpty() && value[0] == BluetoothPacketCodec.DATA_TAG) {
-                            val result = reassembler.ingest(value)
-                            result.ack?.let { ack ->
-                                notifyCharacteristic?.let { nc ->
-                                    gattServer?.let { server -> notifyBytes(server, device, nc, ack.encode()) }
-                                }
-                            }
-                            result.completeEnvelope?.let { env ->
-                                decodeIncomingEnvelope(env)?.let { handleVerifiedInbound(it) }
-                            }
-                        } else {
-                            val single = decodeIncomingEnvelope(value)
-                            if (single != null) {
-                                handleVerifiedInbound(single)
-                            } else {
-                                frameDecoder.append(value)
-                                for (frame in frameDecoder.drainFrames()) {
-                                    handleVerifiedInbound(frame)
-                                }
-                            }
+                    if (preparedWrite) {
+                        val buf = preparedWrites.getOrPut(device.address) { ByteArrayOutputStream() }
+                        if (offset == 0) buf.reset()
+                        buf.write(value)
+                        if (responseNeeded) {
+                            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
                         }
+                        return
+                    }
+                    try {
+                        dispatchCharacteristicWritePayload(device, value)
                         if (responseNeeded) {
                             gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
                         }
@@ -505,6 +546,36 @@ class BlePeripheralManager(
                         reassembler.reset()
                         if (responseNeeded) {
                             gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
+                        }
+                    }
+                }
+            }
+
+            private fun dispatchCharacteristicWritePayload(device: BluetoothDevice, value: ByteArray) {
+                onDiagnosticEvent?.invoke("GATT_SERVER_RX_WRITE(${value.size}B)")
+                if (value.isNotEmpty() && value[0] == BluetoothPacketCodec.DATA_TAG) {
+                    val result = reassembler.ingest(value)
+                    result.ack?.let { ack ->
+                        val ackBytes = ack.encode()
+                        notifyCharacteristic?.let { nc ->
+                            gattServer?.let { server ->
+                                notifyExecutor.submit {
+                                    sendSingleNotificationAndWait(server, device, nc, ackBytes)
+                                }
+                            }
+                        }
+                    }
+                    result.completeEnvelope?.let { env ->
+                        decodeIncomingEnvelope(env)?.let { handleVerifiedInbound(it) }
+                    }
+                } else {
+                    val single = decodeIncomingEnvelope(value)
+                    if (single != null) {
+                        handleVerifiedInbound(single)
+                    } else {
+                        frameDecoder.append(value)
+                        for (frame in frameDecoder.drainFrames()) {
+                            handleVerifiedInbound(frame)
                         }
                     }
                 }

@@ -51,6 +51,7 @@ import com.linkme.androidbridge.core.transport.WifiTlsClient
 import com.linkme.androidbridge.core.transport.WifiTlsServer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -106,6 +107,7 @@ class BridgeForegroundService : Service() {
     private val pendingScreenPacket = AtomicReference<ScreenFramePacket?>(null)
     private val screenSendBusy = AtomicBoolean(false)
     private val pendingPingStartByNonce = ConcurrentHashMap<String, Long>()
+    @Volatile private var pairingTimeoutJob: Job? = null
     @Volatile private var mirrorFpsWindowStartMs: Long = 0L
     @Volatile private var mirrorFrameCounter: Int = 0
 
@@ -537,19 +539,23 @@ class BridgeForegroundService : Service() {
                 }
             }
 
+            val schedulePairingTimeout: () -> Unit = {
+                pairingTimeoutJob?.cancel()
+                pairingTimeoutJob = serviceScope.launch {
+                    kotlinx.coroutines.delay(20_000L)
+                    BridgeActivityHub.failPairingIfWaiting(
+                        "Pairing timed out — check Mac Bluetooth permission or move closer and retry"
+                    )
+                }
+            }
+
             BridgeActivityHub.onStartPairingExchange = { candidate, commit, lanHost, tcpPort ->
                 serviceScope.launch {
                     BridgeActivityHub.beginPairingCommit(candidate)
                     BridgeActivityHub.pendingAutoCommit = commit
                     peripheral.startPairingAdvertisement(candidate.pairToken)
                     launchLanCommit(commit, lanHost, tcpPort)
-
-                    serviceScope.launch {
-                        kotlinx.coroutines.delay(12_000L)
-                        BridgeActivityHub.failPairingIfWaiting(
-                            "Pairing timed out after 12s — verify Mac Bluetooth is On & Secure Pairing QR is open"
-                        )
-                    }
+                    schedulePairingTimeout()
                 }
             }
 
@@ -558,15 +564,19 @@ class BridgeForegroundService : Service() {
                     val payloadBytes = json.encodeToString(commit).toByteArray(Charsets.UTF_8)
                     val commitFrame = WireFrame(WireMessageType.PAIR_COMMIT, 2L, payloadBytes)
                     BridgeActivityHub.pendingAutoCommit = commit
+                    val pairToken = commit.pairToken
+                    if (peripheral.isClientConnected) {
+                        BridgeActivityHub.updatePairingTrace(
+                            step = 2,
+                            statusText = "BLE Linked — Transmitting PAIR_COMMIT...",
+                            errorMessage = null
+                        )
+                    } else if (!pairToken.isNullOrBlank()) {
+                        peripheral.startPairingAdvertisement(pairToken)
+                    }
                     peripheral.sendControlFrame(commitFrame)
                     launchLanCommit(commit, lanHost, tcpPort)
-
-                    serviceScope.launch {
-                        kotlinx.coroutines.delay(12_000L)
-                        BridgeActivityHub.failPairingIfWaiting(
-                            "Mac did not respond — check Mac Bluetooth permission or move closer and retry"
-                        )
-                    }
+                    schedulePairingTimeout()
 
                     BridgeActivityHub.record(
                         BridgeActivityItem(

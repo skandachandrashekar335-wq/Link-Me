@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="v2.1.1"
+VERSION="v2.1.2"
 RELEASE_BASE="https://github.com/skandachandrashekar335-wq/Link-Me/releases/download/${VERSION}"
 CORE_APK="AndroidBridge-${VERSION}.apk"
 ADDON_APK="AndroidBridge-NotifyAddon-${VERSION}.apk"

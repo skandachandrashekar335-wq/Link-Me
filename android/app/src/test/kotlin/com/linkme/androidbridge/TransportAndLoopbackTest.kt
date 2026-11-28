@@ -20,6 +20,7 @@ import com.linkme.androidbridge.core.protocol.PairAckPayload
 import com.linkme.androidbridge.core.protocol.PairCommitPayload
 import com.linkme.androidbridge.core.protocol.PairHelloPayload
 import com.linkme.androidbridge.core.protocol.PairingCommitMac
+import com.linkme.androidbridge.core.protocol.PingTelemetryPayload
 import com.linkme.androidbridge.core.protocol.RemoteInputPayload
 import com.linkme.androidbridge.core.protocol.ScreenControlPayload
 import com.linkme.androidbridge.core.protocol.ScreenFramePacket
@@ -797,7 +798,7 @@ class TransportAndLoopbackTest {
         // 5. v2.0.1 0x01 Ping/Pong telemetry round-trip + RadioDiagnosticsUiState report
         val wireJson = Json { encodeDefaults = true; ignoreUnknownKeys = true }
         val ping01 = PingTelemetryPayload(
-            deviceId = androidId.deviceId,
+            deviceId = "22222222-2222-4222-8222-222222222222",
             batteryLevel = 81,
             isCharging = true,
             batterySaverActive = false,

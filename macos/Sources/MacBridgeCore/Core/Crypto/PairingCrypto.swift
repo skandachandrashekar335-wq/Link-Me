@@ -179,6 +179,12 @@ public struct PairingCrypto: @unchecked Sendable {
         return Data(digest.prefix(8)).hexString
     }
 
+    /// 4-byte SHA-256 discovery tag advertised in BLE Service Data by Android GATT Server during QR pairing.
+    public static func computeTokenTag(_ pairToken: String) -> Data {
+        let digest = SHA256.hash(data: Data(pairToken.utf8))
+        return Data(digest.prefix(4))
+    }
+
     public func makePairingUri(
         deviceId: String,
         certSha256Hex: String,

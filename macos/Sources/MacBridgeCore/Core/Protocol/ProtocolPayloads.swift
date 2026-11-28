@@ -34,6 +34,9 @@ public struct PairHelloPayload: Codable, Sendable, Equatable {
     public let spkiSha256: String
     public let protocolVersion: Int
     public let capabilities: [String]
+    public let pairToken: String?
+    public let batteryLevel: Int?
+    public let isCharging: Bool?
 
     public init(
         deviceId: String,
@@ -41,8 +44,11 @@ public struct PairHelloPayload: Codable, Sendable, Equatable {
         platform: String,
         ephemeralPublicKey: String,
         spkiSha256: String,
-        protocolVersion: Int = 1,
-        capabilities: [String] = ["clipboard", "file_transfer", "notifications", "inline_reply", "telemetry", "ring"]
+        protocolVersion: Int = 2,
+        capabilities: [String] = ["clipboard", "file_transfer", "notifications", "inline_reply", "telemetry", "ring"],
+        pairToken: String? = nil,
+        batteryLevel: Int? = nil,
+        isCharging: Bool? = nil
     ) {
         self.msgType = "PAIR_HELLO"
         self.deviceId = deviceId
@@ -52,6 +58,9 @@ public struct PairHelloPayload: Codable, Sendable, Equatable {
         self.spkiSha256 = spkiSha256
         self.protocolVersion = protocolVersion
         self.capabilities = capabilities
+        self.pairToken = pairToken
+        self.batteryLevel = batteryLevel
+        self.isCharging = isCharging
     }
 }
 

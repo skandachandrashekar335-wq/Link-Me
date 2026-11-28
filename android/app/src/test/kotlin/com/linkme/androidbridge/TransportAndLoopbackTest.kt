@@ -826,5 +826,26 @@ class TransportAndLoopbackTest {
         )
         val report = diag.formatCopyableReport("MacBook Air", 18)
         assertTrue(report.contains("GATT Connected + CCCD Ready") && report.contains("CCCD_ENABLED"))
+
+        // 6. v2.1.0 BLE tokenTag + PAIR_HELLO -> PAIR_COMMIT + Shizuku 0x0E input command builder
+        val tagA = PairingCrypto.computeTokenTag(parsed.pairToken)
+        val tagB = PairingCrypto.computeTokenTag(parsed.pairToken)
+        assertEquals(4, tagA.size)
+        assertArrayEquals(tagA, tagB)
+
+        val tapCmd = com.linkme.androidbridge.service.ShizukuInputCommandBuilder.buildShellCommand(
+            RemoteInputPayload(type = "tap", x = 0.5, y = 0.5),
+            screenWidthPx = 1080,
+            screenHeightPx = 2400
+        )
+        assertEquals("input tap 540 1200", tapCmd)
+        val textCmd = com.linkme.androidbridge.service.ShizukuInputCommandBuilder.buildShellCommand(
+            RemoteInputPayload(type = "text", text = "hello link-me")
+        )
+        assertEquals("input text 'hello%slink-me'", textCmd)
+        val backCmd = com.linkme.androidbridge.service.ShizukuInputCommandBuilder.buildShellCommand(
+            RemoteInputPayload(type = "key", action = "back")
+        )
+        assertEquals("input keyevent 4", backCmd)
     }
 }

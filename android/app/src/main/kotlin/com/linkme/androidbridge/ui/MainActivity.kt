@@ -367,11 +367,10 @@ class MainActivity : ComponentActivity() {
                         text = {
                             Text(
                                 "AndroidBridge keeps Notification Listener permission out of the main APK so Play Protect installs cleanly.\n\n" +
-                                    "To enable notification & remote cursor mirroring:\n" +
-                                    "1. If an older Notify Add-on was installed, uninstall it once (v2.0.1 switches to a permanent release key).\n" +
-                                    "2. Play Protect EFP blocks browser sideloads with Accessibility/Notification permissions; install via USB ADB:\n" +
-                                    "   adb install -r AndroidBridge-NotifyAddon-v2.0.1.apk\n" +
-                                    "3. Grant Restricted Settings -> Notification & Accessibility access.",
+                                    "To enable notification mirroring:\n" +
+                                    "1. Double-click Install-on-Android.command in MacBridge.dmg over USB, OR\n" +
+                                    "2. Run: adb install -r -g AndroidBridge-NotifyAddon-v2.1.0.apk\n" +
+                                    "3. Grant Restricted Settings -> Notification Access to Link-Me Notify Add-on.",
                                 fontSize = 13.sp,
                                 fontFamily = FontFamily.Default
                             )

@@ -19,6 +19,7 @@ import android.os.Build
 import android.os.ParcelUuid
 import com.linkme.androidbridge.core.crypto.BlePrivacyBeacon
 import com.linkme.androidbridge.core.crypto.BluetoothSessionCipher
+import com.linkme.androidbridge.core.crypto.PairingCrypto
 import com.linkme.androidbridge.core.crypto.TrustStore
 import com.linkme.androidbridge.core.protocol.DeviceCommandPayload
 import com.linkme.androidbridge.core.protocol.FrameDecoder
@@ -59,10 +60,12 @@ object BleFrameChunker {
  */
 class BlePeripheralManager(
     private val context: Context,
-    private val beacon: BlePrivacyBeacon?,
+    private var beacon: BlePrivacyBeacon?,
     private val trustStore: TrustStore? = null,
     private val onInboundFrame: ((WireFrame) -> Unit)? = null,
-    private val onConnectionChanged: ((Boolean) -> Unit)? = null
+    private val onConnectionChanged: ((Boolean) -> Unit)? = null,
+    private val onDiagnosticEvent: ((String) -> Unit)? = null,
+    private val onAdvertiseStatusChanged: ((Boolean, String) -> Unit)? = null
 ) {
     private val scheduler = Executors.newSingleThreadScheduledExecutor()
     private val l2capExecutor = Executors.newCachedThreadPool()
@@ -94,6 +97,73 @@ class BlePeripheralManager(
         if (active) {
             stopAdvertising()
         } else {
+            startAdvertisingAndGattServer()
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun startPairingAdvertisement(pairToken: String) {
+        val bluetoothManager = context.getSystemService(BluetoothManager::class.java)
+        val adapter = bluetoothManager?.adapter
+        if (adapter == null || !adapter.isEnabled) {
+            val msg = "Android Bluetooth is Off"
+            onDiagnosticEvent?.invoke("PAIR_ADV_ERROR($msg)")
+            onAdvertiseStatusChanged?.invoke(false, msg)
+            return
+        }
+        val advertiser = adapter.bluetoothLeAdvertiser
+        if (advertiser == null) {
+            val msg = "BLE Peripheral Advertising unsupported on adapter"
+            onDiagnosticEvent?.invoke("PAIR_ADV_ERROR($msg)")
+            onAdvertiseStatusChanged?.invoke(false, msg)
+            return
+        }
+
+        ensureL2capServer(bluetoothManager)
+        ensureGattServer(bluetoothManager)
+        rotationFuture?.cancel(false)
+        rotationFuture = null
+        advertiseCallback?.let { runCatching { advertiser.stopAdvertising(it) } }
+
+        val tokenTag = PairingCrypto.computeTokenTag(pairToken)
+        val settings = AdvertiseSettings.Builder()
+            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+            .setConnectable(true)
+            .build()
+
+        val data = AdvertiseData.Builder()
+            .addServiceUuid(ParcelUuid(SERVICE_UUID))
+            .addServiceData(ParcelUuid(SERVICE_UUID), tokenTag)
+            .setIncludeDeviceName(false)
+            .build()
+
+        val tagHex = tokenTag.joinToString("") { "%02x".format(it) }
+        val callback = object : AdvertiseCallback() {
+            override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+                onDiagnosticEvent?.invoke("BLE_PAIR_ADV_START(tag=$tagHex)")
+                onAdvertiseStatusChanged?.invoke(true, "Advertising BLE (tag=$tagHex)")
+            }
+
+            override fun onStartFailure(errorCode: Int) {
+                val msg = "BLE Advertise Failed (code=$errorCode)"
+                onDiagnosticEvent?.invoke("PAIR_ADV_ERROR($msg)")
+                onAdvertiseStatusChanged?.invoke(false, msg)
+            }
+        }
+        advertiseCallback = callback
+        runCatching { advertiser.startAdvertising(settings, data, callback) }
+            .onFailure { err ->
+                val msg = "BLE Adv Exception: ${err.message ?: "Permission denied"}"
+                onDiagnosticEvent?.invoke("PAIR_ADV_ERROR($msg)")
+                onAdvertiseStatusChanged?.invoke(false, msg)
+            }
+    }
+
+    fun switchToTrustedBeacon(newBeacon: BlePrivacyBeacon?) {
+        beacon = newBeacon
+        stopAdvertising()
+        if (newBeacon != null && !isBatterySaverSuspended) {
             startAdvertisingAndGattServer()
         }
     }
@@ -281,11 +351,13 @@ class BlePeripheralManager(
             override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
                 if (newState == BluetoothGatt.STATE_CONNECTED) {
                     connectedDevice = device
+                    onDiagnosticEvent?.invoke("GATT_SERVER_CONNECTED(${device.address})")
                     onConnectionChanged?.invoke(true)
                 } else if (newState == BluetoothGatt.STATE_DISCONNECTED && connectedDevice?.address == device.address) {
                     connectedDevice = null
                     frameDecoder.reset()
                     reassembler.reset()
+                    onDiagnosticEvent?.invoke("GATT_SERVER_DISCONNECTED(status=$status)")
                     onConnectionChanged?.invoke(false)
                 }
             }
@@ -320,6 +392,7 @@ class BlePeripheralManager(
                 offset: Int,
                 value: ByteArray
             ) {
+                onDiagnosticEvent?.invoke("GATT_SERVER_CCCD_ENABLED(${device.address})")
                 if (responseNeeded) {
                     gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
                 }

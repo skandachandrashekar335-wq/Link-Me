@@ -811,5 +811,50 @@ struct TransportAndLoopbackTests {
 
         let diag = BlePeripheralDiagnostics(isPoweredOn: true, isAdvertising: true, radioStateLabel: "PoweredOn", linkStateLabel: "Advertising", eventLog: ["[10:00:00.000] advertisingStarted"])
         #expect(diag.radioStateLabel == "PoweredOn" && diag.eventLog.count == 1)
+
+        // 7. v2.1.0 Inverted BLE tokenTag Service Data match + PAIR_HELLO -> PAIR_COMMIT -> PAIR_ACK dual TrustStore sync
+        let invMacTrust = TrustStore(fileURL: nil)
+        let invAndroidTrust = TrustStore(fileURL: nil)
+        let invPairing = PairingFeature(identityManager: macIdMgr, trustStore: invMacTrust)
+        let (invUri, _) = try await invPairing.beginPairingSession(tcpPort: 0, deviceName: "Skanda MacBook Air M5")
+        let tokenTag = PairingCrypto.computeTokenTag(invUri.pairToken)
+        #expect(tokenTag.count == 4)
+        #expect(BleCentralManager.matchesPairingServiceData([BleCentralManager.serviceUUID: tokenTag], pairToken: invUri.pairToken))
+
+        let macHello = try await invPairing.buildMacPairHello(deviceName: "Skanda MacBook Air M5")
+        #expect(macHello.pairToken == invUri.pairToken)
+
+        let invAndroidCrypto = PairingCrypto()
+        let invDerived = try invAndroidCrypto.deriveSecrets(
+            peerPublicKeyString: macHello.ephemeralPublicKey,
+            nonce: try #require(Data(hexString: invUri.nonceHex))
+        )
+        #expect(macHello.pairToken == invUri.pairToken)
+        try invAndroidTrust.savePeer(TrustedPeer(
+            deviceId: macHello.deviceId,
+            deviceName: macHello.deviceName,
+            pinnedCertSha256: macHello.spkiSha256,
+            sharedBleSecret: invDerived.sharedBleSecret,
+            bluetoothSessionKey: invDerived.sessionKey
+        ))
+        let androidReplyCommit = PairCommitPayload(
+            deviceId: "33333333-3333-4333-8333-333333333333",
+            deviceName: "SM-A736B",
+            ephemeralPublicKey: invAndroidCrypto.publicKeyBase64Url,
+            spkiSha256: String(repeating: "c", count: 64),
+            sasMacHex: PairingCommitMac.computeHex(
+                sharedBleSecret: invDerived.sharedBleSecret,
+                deviceId: "33333333-3333-4333-8333-333333333333",
+                spkiSha256: String(repeating: "c", count: 64),
+                ephemeralPublicKey: invAndroidCrypto.publicKeyBase64Url
+            ),
+            batteryLevel: 78,
+            isCharging: false,
+            pairToken: invUri.pairToken
+        )
+        let (trustedAndroid, finalAck) = try await invPairing.handleIncomingPairCommit(androidReplyCommit)
+        #expect(trustedAndroid.deviceName == "SM-A736B" && finalAck.accepted)
+        #expect(try invMacTrust.allPeers().first?.deviceId == "33333333-3333-4333-8333-333333333333")
+        #expect(try invAndroidTrust.allPeers().first?.deviceId == macHello.deviceId)
     }
 }

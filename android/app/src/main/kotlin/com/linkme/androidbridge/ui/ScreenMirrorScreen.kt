@@ -67,11 +67,12 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.linkme.androidbridge.service.BridgeActivityHub
-import com.linkme.androidbridge.service.CursorControlAddonStatus
-import com.linkme.androidbridge.service.RemoteControlIpcBridge
+import com.linkme.androidbridge.service.CursorControlStatus
+import com.linkme.androidbridge.service.RemoteControlExecutor
 import com.linkme.androidbridge.service.ScreenMirrorService
 import com.linkme.androidbridge.service.ScreenMirrorUiState
 import com.linkme.androidbridge.ui.theme.LocalBridgePalette
+import rikka.shizuku.Shizuku
 
 @Composable
 fun ScreenMirrorScreen(
@@ -88,17 +89,24 @@ fun ScreenMirrorScreen(
     var panOffset by remember { mutableStateOf(Offset.Zero) }
     var useCropFill by remember { mutableStateOf(false) }
     var cursorStatus by remember {
-        mutableStateOf(RemoteControlIpcBridge.inspectCursorStatus(context))
+        mutableStateOf(RemoteControlExecutor.inspectStatus())
     }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                cursorStatus = RemoteControlIpcBridge.inspectCursorStatus(context)
+                cursorStatus = RemoteControlExecutor.inspectStatus()
             }
         }
+        val permListener = Shizuku.OnRequestPermissionResultListener { _, _ ->
+            cursorStatus = RemoteControlExecutor.inspectStatus()
+        }
+        runCatching { Shizuku.addRequestPermissionResultListener(permListener) }
         lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        onDispose {
+            runCatching { Shizuku.removeRequestPermissionResultListener(permListener) }
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     val projectionLauncher = rememberLauncherForActivityResult(
@@ -131,8 +139,8 @@ fun ScreenMirrorScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // Non-blocking Cursor Control Add-on / Accessibility Banner (viewing & casting stay active)
-        val cursorReady = cursorStatus == CursorControlAddonStatus.ACTIVE
+        // Zero-Permission Remote Cursor & Keyboard Banner via Shizuku
+        val cursorReady = cursorStatus == CursorControlStatus.SHIZUKU_ACTIVE
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(18.dp),
@@ -158,9 +166,9 @@ fun ScreenMirrorScreen(
                     Column(modifier = Modifier.padding(end = 8.dp)) {
                         Text(
                             text = when (cursorStatus) {
-                                CursorControlAddonStatus.ACTIVE -> "Mac Cursor Control Ready"
-                                CursorControlAddonStatus.COMPANION_NOT_INSTALLED -> "Install Companion Add-on for Remote Cursor Control"
-                                CursorControlAddonStatus.ACCESSIBILITY_DISABLED -> "Enable Cursor Control (Accessibility)"
+                                CursorControlStatus.SHIZUKU_ACTIVE -> "Cursor Control: Shizuku Active"
+                                CursorControlStatus.SHIZUKU_PERMISSION_REQUIRED -> "1-Tap Enable via Shizuku"
+                                CursorControlStatus.SHIZUKU_NOT_RUNNING -> "Enable Shizuku for Cursor Control"
                             },
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -168,53 +176,34 @@ fun ScreenMirrorScreen(
                         )
                         Text(
                             text = when (cursorStatus) {
-                                CursorControlAddonStatus.ACTIVE ->
-                                    "Clicks, swipes & keyboard input from macOS Mirror route live via Companion Add-on."
-                                CursorControlAddonStatus.COMPANION_NOT_INSTALLED ->
-                                    "Screen viewing & casting stay active now. Install AndroidBridge-NotifyAddon APK for remote cursor control."
-                                CursorControlAddonStatus.ACCESSIBILITY_DISABLED ->
-                                    "Grant Accessibility inside Companion Add-on to control Android with your Mac mouse & keyboard."
+                                CursorControlStatus.SHIZUKU_ACTIVE ->
+                                    "Mac mouse clicks, scrolls & keyboard typing execute live via zero-permission Shizuku."
+                                CursorControlStatus.SHIZUKU_PERMISSION_REQUIRED ->
+                                    "Shizuku daemon detected. Tap to authorize Link-Me for Mac cursor & keyboard control."
+                                CursorControlStatus.SHIZUKU_NOT_RUNNING ->
+                                    "Viewing stays active now. Start Shizuku (Wireless Debugging) for remote touch & keyboard."
                             },
                             fontSize = 11.sp,
                             color = pal.secondaryText
                         )
                     }
                 }
-                when (cursorStatus) {
-                    CursorControlAddonStatus.COMPANION_NOT_INSTALLED -> {
-                        OutlinedButton(
-                            onClick = {
-                                runCatching {
-                                    context.startActivity(
-                                        Intent(
-                                            Intent.ACTION_VIEW,
-                                            Uri.parse("https://github.com/skandachandrashekar335-wq/Link-Me/releases")
-                                        )
-                                    )
-                                }
-                            },
-                            shape = CircleShape,
-                            border = BorderStroke(1.dp, pal.outlineVariant)
-                        ) {
-                            Text("Get Add-on", fontSize = 11.sp, color = pal.onSurface, fontWeight = FontWeight.SemiBold)
-                        }
+                if (!cursorReady) {
+                    Button(
+                        onClick = {
+                            RemoteControlExecutor.requestEnableOrOpenShizuku(context)
+                            cursorStatus = RemoteControlExecutor.inspectStatus()
+                        },
+                        shape = CircleShape,
+                        colors = ButtonDefaults.buttonColors(containerColor = pal.primaryAccent)
+                    ) {
+                        Text(
+                            if (cursorStatus == CursorControlStatus.SHIZUKU_PERMISSION_REQUIRED) "1-Tap Enable" else "Open Shizuku",
+                            fontSize = 11.sp,
+                            color = Color.White,
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
-
-                    CursorControlAddonStatus.ACCESSIBILITY_DISABLED -> {
-                        Button(
-                            onClick = {
-                                runCatching {
-                                    context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                                }
-                            },
-                            shape = CircleShape,
-                            colors = ButtonDefaults.buttonColors(containerColor = pal.primaryAccent)
-                        ) {
-                            Text("Enable", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
-                        }
-                    }
-
-                    CursorControlAddonStatus.ACTIVE -> Unit
                 }
             }
         }

@@ -36,6 +36,12 @@ sealed class PairingCommitStatus {
     data class Failed(val reason: String) : PairingCommitStatus()
 }
 
+data class PairingTraceState(
+    val step: Int = 1,
+    val statusText: String = "Point camera at MacBridge QR",
+    val errorMessage: String? = null
+)
+
 enum class ActivityCategory {
     FILES,
     CLIPBOARD,
@@ -144,6 +150,9 @@ object BridgeActivityHub {
     private val _pairingStatus = MutableStateFlow<PairingCommitStatus>(PairingCommitStatus.Idle)
     val pairingStatus: StateFlow<PairingCommitStatus> = _pairingStatus.asStateFlow()
 
+    private val _pairingTrace = MutableStateFlow(PairingTraceState())
+    val pairingTrace: StateFlow<PairingTraceState> = _pairingTrace.asStateFlow()
+
     private val _radioDiagnostics = MutableStateFlow(RadioDiagnosticsUiState())
     val radioDiagnostics: StateFlow<RadioDiagnosticsUiState> = _radioDiagnostics.asStateFlow()
 
@@ -155,7 +164,13 @@ object BridgeActivityHub {
     @Volatile
     var pendingPairingCandidate: PendingPairingCandidate? = null
 
+    @Volatile
+    var pendingAutoCommit: PairCommitPayload? = null
+
     private val pendingFileUris = ConcurrentLinkedQueue<String>()
+
+    @Volatile
+    var onStartPairingExchange: ((candidate: PendingPairingCandidate, commit: PairCommitPayload, lanHost: String?, tcpPort: Int) -> Unit)? = null
 
     @Volatile
     var onSendMediaAction: ((MediaControlAction) -> Unit)? = null
@@ -251,18 +266,34 @@ object BridgeActivityHub {
         _stealthBlackActive.value = active
     }
 
+    fun updatePairingTrace(step: Int? = null, statusText: String? = null, errorMessage: String? = null) {
+        val cur = _pairingTrace.value
+        _pairingTrace.value = PairingTraceState(
+            step = step ?: cur.step,
+            statusText = statusText ?: cur.statusText,
+            errorMessage = errorMessage
+        )
+    }
+
     fun beginPairingCommit(candidate: PendingPairingCandidate) {
         pendingPairingCandidate = candidate
         _pairingStatus.value = PairingCommitStatus.Connecting(candidate.peerName)
+        updatePairingTrace(step = 1, statusText = "QR Decoded — Starting BLE & LAN...", errorMessage = null)
     }
 
     fun completePairingSuccess(candidate: PendingPairingCandidate, ack: PairAckPayload) {
         pendingPairingCandidate = null
+        pendingAutoCommit = null
         _pairingStatus.value = PairingCommitStatus.Connected(
             peerId = candidate.peerId,
             peerName = ack.deviceName.ifBlank { candidate.peerName },
             pinnedCertSha256 = candidate.pinnedCertSha256,
             ack = ack
+        )
+        updatePairingTrace(
+            step = 4,
+            statusText = "Paired & Synced with ${ack.deviceName.ifBlank { candidate.peerName }}",
+            errorMessage = null
         )
         updatePeerTelemetry(
             percent = ack.batteryLevel,
@@ -274,13 +305,17 @@ object BridgeActivityHub {
     fun failPairingIfWaiting(reason: String) {
         if (_pairingStatus.value is PairingCommitStatus.Connecting) {
             pendingPairingCandidate = null
+            pendingAutoCommit = null
             _pairingStatus.value = PairingCommitStatus.Failed(reason)
+            updatePairingTrace(errorMessage = reason)
         }
     }
 
     fun resetPairingStatus() {
         pendingPairingCandidate = null
+        pendingAutoCommit = null
         _pairingStatus.value = PairingCommitStatus.Idle
+        _pairingTrace.value = PairingTraceState()
     }
 
     fun updateRadioDiagnostics(

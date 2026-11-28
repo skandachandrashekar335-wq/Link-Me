@@ -147,6 +147,25 @@ public actor PairingFeature {
         return !session.isExpired(at: date)
     }
 
+    public func buildMacPairHello(deviceName: String? = nil) throws -> PairHelloPayload {
+        guard let session = activeSession else {
+            throw PairingCryptoError.sessionExpired
+        }
+        let identity = try identityManager.loadOrCreateIdentity()
+        let battery = MacBatteryMonitor.readBattery()
+        return PairHelloPayload(
+            deviceId: identity.deviceId,
+            deviceName: deviceName ?? (Host.current().localizedName ?? "MacBridge"),
+            platform: "macos",
+            ephemeralPublicKey: session.publicKeyBase64Url,
+            spkiSha256: identity.certificateSha256Hex,
+            protocolVersion: 2,
+            pairToken: session.pairToken,
+            batteryLevel: battery.level ?? 100,
+            isCharging: battery.isCharging
+        )
+    }
+
     public func buildPairAck(deviceName: String? = nil) throws -> PairAckPayload {
         let identity = try identityManager.loadOrCreateIdentity()
         let battery = MacBatteryMonitor.readBattery()

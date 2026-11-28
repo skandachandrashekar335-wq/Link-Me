@@ -137,6 +137,7 @@ fun QrScannerScreen(
     val pal = LocalBridgePalette.current
     val scope = rememberCoroutineScope()
     val pairingStatus by BridgeActivityHub.pairingStatus.collectAsState()
+    val pairingTrace by BridgeActivityHub.pairingTrace.collectAsState()
 
     var hasCameraPermission by remember {
         mutableStateOf(
@@ -200,22 +201,13 @@ fun QrScannerScreen(
                 } else {
                     "$prefsAlias ($hardwareModel)"
                 }
-                val hello = PairHelloPayload(
-                    deviceId = localIdentity.deviceId,
-                    deviceName = advertisedDeviceName,
-                    platform = "android",
-                    ephemeralPublicKey = crypto.publicKeyBase64Url,
-                    spkiSha256 = localIdentity.certificateSha256Hex
-                )
-                BridgeActivityHub.onSendPairHello?.invoke(hello, parsed.lanHost, parsed.tcpPort)
-
                 val resolvedFp = if (parsed.hasFullCertFingerprint) {
                     parsed.certSha256Prefix.lowercase()
                 } else {
                     manualFingerprintOverride.trim().lowercase().ifEmpty { parsed.certSha256Prefix.lowercase() }
                 }
 
-                ParsedPairingState(
+                val state = ParsedPairingState(
                     peerId = parsed.deviceId,
                     peerName = parsed.deviceName ?: "MacBook Pro",
                     sasCode = derived.sasCode,
@@ -230,6 +222,36 @@ fun QrScannerScreen(
                     localEphemeralPublicKey = crypto.publicKeyBase64Url,
                     localSpkiSha256 = localIdentity.certificateSha256Hex
                 )
+                if (resolvedFp.length == 64 && resolvedFp.all { it in '0'..'9' || it in 'a'..'f' }) {
+                    val snap = TelemetryFeature(localIdentity.deviceId).readCurrentBattery(context)
+                    val macHex = PairingCommitMac.computeHex(
+                        sharedBleSecret = derived.sharedBleSecret,
+                        deviceId = localIdentity.deviceId,
+                        spkiSha256 = localIdentity.certificateSha256Hex,
+                        ephemeralPublicKey = crypto.publicKeyBase64Url
+                    )
+                    val commit = PairCommitPayload(
+                        deviceId = localIdentity.deviceId,
+                        deviceName = advertisedDeviceName,
+                        platform = "android",
+                        ephemeralPublicKey = crypto.publicKeyBase64Url,
+                        spkiSha256 = localIdentity.certificateSha256Hex,
+                        sasMacHex = macHex,
+                        batteryLevel = snap.level ?: 0,
+                        isCharging = snap.isCharging,
+                        pairToken = parsed.pairToken
+                    )
+                    val candidate = PendingPairingCandidate(
+                        peerId = state.peerId,
+                        peerName = state.peerName,
+                        pinnedCertSha256 = resolvedFp,
+                        sharedBleSecret = derived.sharedBleSecret,
+                        bluetoothSessionKey = derived.sessionKey,
+                        pairToken = parsed.pairToken
+                    )
+                    BridgeActivityHub.onStartPairingExchange?.invoke(candidate, commit, parsed.lanHost, parsed.tcpPort)
+                }
+                state
             }.onSuccess { result ->
                 qrDetectedBadge = true
                 errorMessage = null
@@ -577,6 +599,57 @@ fun QrScannerScreen(
                                 )
                             }
                         }
+                    }
+
+                    // Live 4-step handshake trace (1. QR Decoded -> 2. Radio Linked -> 3. Key Exchange -> 4. Paired & Synced)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(pal.surfaceLowest)
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        val steps = listOf(
+                            1 to "1. QR Decoded",
+                            2 to "2. Radio Linked (BLE / Wi-Fi)",
+                            3 to "3. Key Exchange",
+                            4 to "4. Paired & Synced"
+                        )
+                        steps.forEach { (num, label) ->
+                            val isDone = pairingTrace.step > num || (pairingTrace.step == 4 && num == 4)
+                            val isCurrent = pairingTrace.step == num
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(
+                                            when {
+                                                isDone -> pal.secondaryAccent
+                                                isCurrent -> pal.primaryAccent
+                                                else -> pal.outlineVariant
+                                            }
+                                        )
+                                )
+                                Text(
+                                    text = label,
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = if (isDone || isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                                    color = if (isDone || isCurrent) pal.onSurface else pal.secondaryText
+                                )
+                            }
+                        }
+                        Text(
+                            text = pairingTrace.errorMessage ?: pairingTrace.statusText,
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = if (pairingTrace.errorMessage != null) Color(0xFFFF453A) else pal.secondaryAccent
+                        )
                     }
 
                     Text(

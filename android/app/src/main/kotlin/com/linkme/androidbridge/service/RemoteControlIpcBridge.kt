@@ -40,42 +40,10 @@ object RemoteControlIpcBridge {
     private val json = Json { ignoreUnknownKeys = true }
 
     fun inspectCursorStatus(context: Context): CursorControlAddonStatus {
-        val addonInstalled = runCatching {
-            context.packageManager.getPackageInfo(NotificationCompanionBridge.ADDON_PACKAGE_NAME, 0)
-            true
-        }.getOrDefault(false)
-
-        if (!addonInstalled) {
-            return CursorControlAddonStatus.COMPANION_NOT_INSTALLED
-        }
-
-        val expectedComponent = ComponentName(
-            NotificationCompanionBridge.ADDON_PACKAGE_NAME,
-            ADDON_ACCESSIBILITY_CLASS
-        )
-        val fullName = expectedComponent.flattenToString()
-        val shortName = expectedComponent.flattenToShortString()
-
-        val enabledViaSettings = runCatching {
-            Settings.Secure.getString(
-                context.contentResolver,
-                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-            ).orEmpty()
-                .split(':')
-                .any { it.equals(fullName, ignoreCase = true) || it.equals(shortName, ignoreCase = true) }
-        }.getOrDefault(false)
-
-        val enabledViaManager = runCatching {
-            val mgr = context.getSystemService(AccessibilityManager::class.java)
-            mgr?.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
-                ?.any { it.resolveInfo?.serviceInfo?.packageName == NotificationCompanionBridge.ADDON_PACKAGE_NAME }
-                ?: false
-        }.getOrDefault(false)
-
-        return if (enabledViaSettings || enabledViaManager) {
-            CursorControlAddonStatus.ACTIVE
-        } else {
-            CursorControlAddonStatus.ACCESSIBILITY_DISABLED
+        return when (RemoteControlExecutor.inspectStatus()) {
+            CursorControlStatus.SHIZUKU_ACTIVE -> CursorControlAddonStatus.ACTIVE
+            CursorControlStatus.SHIZUKU_PERMISSION_REQUIRED -> CursorControlAddonStatus.ACCESSIBILITY_DISABLED
+            CursorControlStatus.SHIZUKU_NOT_RUNNING -> CursorControlAddonStatus.COMPANION_NOT_INSTALLED
         }
     }
 
@@ -88,16 +56,10 @@ object RemoteControlIpcBridge {
     }
 
     fun dispatchRemoteInput(context: Context, payload: RemoteInputPayload): CursorControlAddonStatus {
-        val status = inspectCursorStatus(context)
-        if (status != CursorControlAddonStatus.ACTIVE) {
-            return status
+        return when (RemoteControlExecutor.executeRemoteInput(context, payload)) {
+            CursorControlStatus.SHIZUKU_ACTIVE -> CursorControlAddonStatus.ACTIVE
+            CursorControlStatus.SHIZUKU_PERMISSION_REQUIRED -> CursorControlAddonStatus.ACCESSIBILITY_DISABLED
+            CursorControlStatus.SHIZUKU_NOT_RUNNING -> CursorControlAddonStatus.COMPANION_NOT_INSTALLED
         }
-        val payloadJson = encodeRemoteInputJson(payload)
-        val intent = Intent(ACTION_REMOTE_INPUT_IPC).apply {
-            setPackage(NotificationCompanionBridge.ADDON_PACKAGE_NAME)
-            putExtra(NotificationCompanionBridge.EXTRA_PAYLOAD_JSON, payloadJson)
-        }
-        context.sendBroadcast(intent, NotificationCompanionBridge.PERMISSION_MIRROR_IPC)
-        return CursorControlAddonStatus.ACTIVE
     }
 }

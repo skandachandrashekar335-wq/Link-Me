@@ -51,6 +51,8 @@ jobs:
         run: |
           TAG_NAME="${{ github.event.inputs.tag || github.ref_name }}"
           ln -s /Applications dist/Applications
+          cp macos/Scripts/Install-on-Android.command dist/Install-on-Android.command
+          chmod +x dist/Install-on-Android.command
           hdiutil create -volname "MacBridge" \
             -srcfolder dist/ \
             -ov -format UDZO \
@@ -152,7 +154,11 @@ jobs:
 
           "$AAPT2" dump xmltree "release-out/AndroidBridge-${TAG_NAME}.apk" --file AndroidManifest.xml > /tmp/core-apk-manifest.txt
           "$AAPT2" dump permissions "release-out/AndroidBridge-${TAG_NAME}.apk" > /tmp/core-apk-perms.txt
+          "$AAPT2" dump permissions "release-out/AndroidBridge-NotifyAddon-${TAG_NAME}.apk" > /tmp/addon-apk-perms.txt
+          echo "=== Core APK Permissions ==="
           cat /tmp/core-apk-perms.txt
+          echo "=== NotifyAddon APK Permissions ==="
+          cat /tmp/addon-apk-perms.txt
           for perm in \
             android.permission.BIND_ACCESSIBILITY_SERVICE \
             android.permission.BIND_NOTIFICATION_LISTENER_SERVICE \
@@ -164,7 +170,17 @@ jobs:
               exit 1
             fi
           done
-          echo "Verified signed AndroidBridge-${TAG_NAME}.apk binary contains zero Play-Protect high-risk permissions."
+          for perm in \
+            android.permission.BIND_ACCESSIBILITY_SERVICE \
+            android.permission.BIND_DEVICE_ADMIN \
+            android.permission.REQUEST_INSTALL_PACKAGES \
+            android.permission.SYSTEM_ALERT_WINDOW; do
+            if grep -q "$perm" /tmp/addon-apk-perms.txt; then
+              echo "ERROR: Restricted permission $perm leaked into signed NotifyAddon APK!"
+              exit 1
+            fi
+          done
+          echo "Verified both signed APKs (Core + NotifyAddon) free of Accessibility/Admin/Alert/Install blocks."
 
           (cd release-out && sha256sum "AndroidBridge-${TAG_NAME}.apk" "AndroidBridge-NotifyAddon-${TAG_NAME}.apk" > SHA256SUMS.android.txt)
           ls -lh release-out/

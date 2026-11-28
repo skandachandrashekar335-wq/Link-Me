@@ -78,3 +78,17 @@ object AddonIpcContract {
         return runCatching { json.decodeFromString<RemoteInputIpcMessage>(rawJson) }.getOrNull()
     }
 }
+
+object AddonRemoteInputMapper {
+    fun toPixel(normalized: Double, maxDimensionPx: Int): Float {
+        if (maxDimensionPx <= 1) return 0f
+        val clamped = normalized.coerceIn(0.0, 1.0)
+        return (clamped * maxDimensionPx.toDouble()).toFloat().coerceIn(0f, (maxDimensionPx - 1).toFloat())
+    }
+
+    fun applyBackspace(current: String): String =
+        if (current.isEmpty()) "" else current.dropLast(1)
+
+    fun applyAppendText(current: String, addition: String): String =
+        if (current.isEmpty()) addition else "$current$addition"
+}

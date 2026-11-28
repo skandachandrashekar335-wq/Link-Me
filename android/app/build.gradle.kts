@@ -13,8 +13,8 @@ android {
         applicationId = "com.linkme.androidbridge"
         minSdk = 29
         targetSdk = 35
-        versionCode = 11
-        versionName = "2.0.1"
+        versionCode = 12
+        versionName = "2.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -62,6 +62,8 @@ dependencies {
     implementation(libs.mlkit.barcode.scanning)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.rikka.shizuku.api)
+    implementation(libs.rikka.shizuku.provider)
 
     testImplementation(libs.junit)
 }

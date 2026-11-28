@@ -192,6 +192,8 @@ final class BridgeDashboardViewModel: ObservableObject {
     @Published var pairingUriString: String = ""
     @Published var pairingExpiresAt: Date = Date().addingTimeInterval(300)
     @Published var pendingApproval: PendingPairingApproval?
+    @Published var pairingStep: Int = 1
+    @Published var pairingStepMessage: String = "Show QR code for AndroidBridge to scan"
     @Published var statusBanner: String?
 
     // Diagnostics & real hardware state
@@ -324,6 +326,20 @@ final class BridgeDashboardViewModel: ObservableObject {
         central.onLatencyMeasured = { [weak self] rtt in
             Task { @MainActor in
                 self?.latencyMs = rtt
+            }
+        }
+        central.onPairingStepChanged = { [weak self] step, message in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if step >= self.pairingStep || message.contains("Bluetooth") || message.contains("Error") {
+                    self.pairingStep = max(1, min(4, step))
+                    self.pairingStepMessage = message
+                }
+            }
+        }
+        central.onDiagnosticEvent = { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.recordWireEvent(event)
             }
         }
         central.onInboundFrame = { [weak self] frame in
@@ -570,6 +586,9 @@ final class BridgeDashboardViewModel: ObservableObject {
         peerIsCharging = commit.isCharging
         isShowingPairingSheet = false
         pendingApproval = nil
+        pairingStep = 4
+        pairingStepMessage = "Paired & Synced with \(result.peer.deviceName)"
+        bleCentralManager?.stopPairingDiscovery()
         bleCentralManager?.startScanning()
         await clipboardManager.setPeerReachable(true)
         statusBanner = "Paired with \(result.peer.deviceName) • \(commit.batteryLevel)%"
@@ -1292,6 +1311,15 @@ final class BridgeDashboardViewModel: ObservableObject {
             pairingUriString = uri.uriString
             pairingExpiresAt = expires
             pendingApproval = nil
+            pairingStep = 1
+            pairingStepMessage = "QR ready — Scanning BLE & Wi-Fi for Android..."
+            if let macHello = try? await pairingFeature.buildMacPairHello(deviceName: preferences.normalizedAlias),
+               let helloData = try? JSONEncoder().encode(macHello),
+               let helloFrame = try? WireFrame(messageType: .pairHello, sequenceId: 1, payload: helloData) {
+                bleCentralManager?.startPairingDiscovery(pairToken: uri.pairToken) {
+                    helloFrame
+                }
+            }
         } catch {
             statusBanner = "Failed to initialize pairing"
         }
@@ -1338,9 +1366,11 @@ final class BridgeDashboardViewModel: ObservableObject {
 
     func rejectPairing() {
         Task {
+            bleCentralManager?.stopPairingDiscovery()
             await pairingFeature.rejectPairing()
             isShowingPairingSheet = false
             pendingApproval = nil
+            pairingStep = 1
         }
     }
 

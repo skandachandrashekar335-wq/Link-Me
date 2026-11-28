@@ -11,16 +11,9 @@ import android.content.Intent
 class AddonCommandReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val raw = intent.getStringExtra(AddonIpcContract.EXTRA_PAYLOAD_JSON)
-        when (intent.action) {
-            AddonIpcContract.ACTION_DEVICE_COMMAND_IPC -> {
-                val command = AddonIpcContract.decodeCommand(raw) ?: return
-                AddonNotificationListenerService.activeInstance?.handleCommand(command)
-            }
-
-            AddonIpcContract.ACTION_REMOTE_INPUT_IPC -> {
-                val remoteInput = AddonIpcContract.decodeRemoteInput(raw) ?: return
-                RemoteControlAccessibilityService.dispatchRemoteInput(remoteInput)
-            }
+        if (intent.action == AddonIpcContract.ACTION_DEVICE_COMMAND_IPC) {
+            val command = AddonIpcContract.decodeCommand(raw) ?: return
+            AddonNotificationListenerService.activeInstance?.handleCommand(command)
         }
     }
 }

@@ -44,6 +44,28 @@ struct PairingView: View {
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(pal.secondaryText)
 
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array([(1, "1. QR Decoded / Ready"), (2, "2. Radio Linked (BLE/Wi-Fi)"), (3, "3. Key Exchange"), (4, "4. Paired & Synced")].enumerated()), id: \.offset) { _, row in
+                    let done = viewModel.pairingStep > row.0 || (viewModel.pairingStep == 4 && row.0 == 4)
+                    let active = viewModel.pairingStep == row.0
+                    HStack(spacing: 8) {
+                        Image(systemName: done ? "checkmark.circle.fill" : (active ? "dot.radiowaves.left.and.right" : "circle"))
+                            .font(.system(size: 11))
+                            .foregroundStyle(done ? pal.secondaryAccent : (active ? pal.primaryAccent : pal.secondaryText))
+                        Text(row.1)
+                            .font(.system(size: 11, weight: (done || active) ? .semibold : .regular, design: .monospaced))
+                            .foregroundStyle((done || active) ? pal.onSurface : pal.secondaryText)
+                        Spacer()
+                    }
+                }
+                Text(viewModel.pairingStepMessage)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(pal.secondaryAccent)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 12).fill(pal.surfaceLow))
+
             if let approval = viewModel.pendingApproval {
                 VStack(spacing: 6) {
                     Text("Incoming peer: \(approval.peerDeviceName)")

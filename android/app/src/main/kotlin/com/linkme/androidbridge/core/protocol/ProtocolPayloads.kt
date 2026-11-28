@@ -23,7 +23,7 @@ data class PairHelloPayload(
     val platform: String,
     val ephemeralPublicKey: String,
     val spkiSha256: String,
-    val protocolVersion: Int = 1,
+    val protocolVersion: Int = 2,
     val capabilities: List<String> = listOf(
         "clipboard",
         "file_transfer",
@@ -31,7 +31,10 @@ data class PairHelloPayload(
         "inline_reply",
         "telemetry",
         "ring"
-    )
+    ),
+    val pairToken: String? = null,
+    val batteryLevel: Int? = null,
+    val isCharging: Boolean? = null
 )
 
 @Serializable

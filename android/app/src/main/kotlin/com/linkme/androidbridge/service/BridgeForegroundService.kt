@@ -163,6 +163,7 @@ class BridgeForegroundService : Service() {
         BridgeActivityHub.onResolvePendingFileOffer = null
         BridgeActivityHub.onSendPairHello = null
         BridgeActivityHub.onSendPairCommit = null
+        BridgeActivityHub.onStartPairingExchange = null
         BridgeActivityHub.onSendDeviceCommand = null
         BridgeActivityHub.onPeerTrustedUpdated = null
         BridgeActivityHub.onRequestRemoteScreenMirror = null
@@ -333,8 +334,32 @@ class BridgeForegroundService : Service() {
                     BridgeActivityHub.updateConnectionState(
                         bleConnected = connected || (bleGattClient?.isConnected == true)
                     )
+                    if (connected && BridgeActivityHub.pendingPairingCandidate != null) {
+                        BridgeActivityHub.updatePairingTrace(
+                            step = 2,
+                            statusText = "BLE GATT Linked with Mac — Exchanging Keys...",
+                            errorMessage = null
+                        )
+                    }
                     if (connected && store.allPeers().isNotEmpty()) {
                         serviceScope.launch { emitImmediateTelemetry() }
+                    }
+                },
+                onDiagnosticEvent = { event ->
+                    BridgeActivityHub.appendWireEvent(event)
+                },
+                onAdvertiseStatusChanged = { ok, msg ->
+                    BridgeActivityHub.updateRadioDiagnostics(bleLinkState = msg)
+                    if (BridgeActivityHub.pendingPairingCandidate != null) {
+                        if (ok) {
+                            BridgeActivityHub.updatePairingTrace(
+                                step = 2,
+                                statusText = "$msg — Waiting for Mac...",
+                                errorMessage = null
+                            )
+                        } else {
+                            BridgeActivityHub.updatePairingTrace(errorMessage = msg)
+                        }
                     }
                 }
             )
@@ -472,41 +497,71 @@ class BridgeForegroundService : Service() {
                 }
             }
 
+            val launchLanCommit: (PairCommitPayload, String?, Int) -> Unit = { commit, lanHost, tcpPort ->
+                val payloadBytes = json.encodeToString(commit).toByteArray(Charsets.UTF_8)
+                val commitFrame = WireFrame(WireMessageType.PAIR_COMMIT, 2L, payloadBytes)
+                if (!lanHost.isNullOrBlank() && tcpPort > 0) {
+                    serviceScope.launch {
+                        runCatching {
+                            Socket().use { sock ->
+                                sock.soTimeout = 4000
+                                sock.connect(InetSocketAddress(lanHost, tcpPort), 1500)
+                                BridgeActivityHub.updatePairingTrace(
+                                    step = 2,
+                                    statusText = "Wi-Fi LAN Linked ($lanHost:$tcpPort) — Key Exchange...",
+                                    errorMessage = null
+                                )
+                                val out = sock.getOutputStream()
+                                out.write(FrameEncoder.encode(commitFrame))
+                                out.flush()
+                                BridgeActivityHub.updatePairingTrace(
+                                    step = 3,
+                                    statusText = "Key Exchange via Wi-Fi LAN — Awaiting PAIR_ACK...",
+                                    errorMessage = null
+                                )
+                                val buf = ByteArray(16_384)
+                                val read = runCatching { sock.getInputStream().read(buf) }.getOrDefault(-1)
+                                if (read > 0) {
+                                    val decoder = com.linkme.androidbridge.core.protocol.FrameDecoder()
+                                    decoder.append(buf.copyOf(read))
+                                    for (replyFrame in decoder.drainFrames()) {
+                                        routeInboundFrame(replyFrame)
+                                    }
+                                }
+                            }
+                        }.onFailure { err ->
+                            BridgeActivityHub.appendWireEvent("PAIR_TCP_FALLBACK(${err.message ?: "off-lan"})")
+                        }
+                    }
+                }
+            }
+
+            BridgeActivityHub.onStartPairingExchange = { candidate, commit, lanHost, tcpPort ->
+                serviceScope.launch {
+                    BridgeActivityHub.beginPairingCommit(candidate)
+                    BridgeActivityHub.pendingAutoCommit = commit
+                    peripheral.startPairingAdvertisement(candidate.pairToken)
+                    launchLanCommit(commit, lanHost, tcpPort)
+
+                    serviceScope.launch {
+                        kotlinx.coroutines.delay(12_000L)
+                        BridgeActivityHub.failPairingIfWaiting(
+                            "Pairing timed out after 12s — verify Mac Bluetooth is On & Secure Pairing QR is open"
+                        )
+                    }
+                }
+            }
+
             BridgeActivityHub.onSendPairCommit = { commit, lanHost, tcpPort ->
                 serviceScope.launch {
                     val payloadBytes = json.encodeToString(commit).toByteArray(Charsets.UTF_8)
                     val commitFrame = WireFrame(WireMessageType.PAIR_COMMIT, 2L, payloadBytes)
+                    BridgeActivityHub.pendingAutoCommit = commit
+                    peripheral.sendControlFrame(commitFrame)
+                    launchLanCommit(commit, lanHost, tcpPort)
 
-                    // Race BLE GATT and Wi-Fi TCP (1500ms timeout) in parallel
                     serviceScope.launch {
-                        runCatching { gattClient.sendPairingFrameOverBle(commitFrame) }
-                    }
-                    if (!lanHost.isNullOrBlank() && tcpPort > 0) {
-                        serviceScope.launch {
-                            runCatching {
-                                Socket().use { sock ->
-                                    sock.soTimeout = 4000
-                                    sock.connect(InetSocketAddress(lanHost, tcpPort), 1500)
-                                    val out = sock.getOutputStream()
-                                    out.write(FrameEncoder.encode(commitFrame))
-                                    out.flush()
-                                    val buf = ByteArray(16_384)
-                                    val read = runCatching { sock.getInputStream().read(buf) }.getOrDefault(-1)
-                                    if (read > 0) {
-                                        val decoder = com.linkme.androidbridge.core.protocol.FrameDecoder()
-                                        decoder.append(buf.copyOf(read))
-                                        for (replyFrame in decoder.drainFrames()) {
-                                            routeInboundFrame(replyFrame)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // 6-second PAIR_ACK watchdog so Android never hangs or fakes Connected
-                    serviceScope.launch {
-                        kotlinx.coroutines.delay(6000L)
+                        kotlinx.coroutines.delay(12_000L)
                         BridgeActivityHub.failPairingIfWaiting(
                             "Mac did not respond — check Mac Bluetooth permission or move closer and retry"
                         )
@@ -731,6 +786,41 @@ class BridgeForegroundService : Service() {
         val telemetry = telemetryFeature
 
         when (frame.messageType) {
+            WireMessageType.PAIR_HELLO -> {
+                runCatching { json.decodeFromString<com.linkme.androidbridge.core.protocol.PairHelloPayload>(frame.payload.decodeToString()) }
+                    .onSuccess { hello ->
+                        val pending = BridgeActivityHub.pendingPairingCandidate
+                        val autoCommit = BridgeActivityHub.pendingAutoCommit
+                        val store = trustStore
+                        if (pending != null && store != null && autoCommit != null) {
+                            val tokenOk = hello.pairToken.isNullOrBlank() ||
+                                hello.pairToken.equals(pending.pairToken, ignoreCase = true)
+                            if (tokenOk) {
+                                BridgeActivityHub.updatePairingTrace(
+                                    step = 3,
+                                    statusText = "Key Exchange Verified (PAIR_HELLO) — Replying PAIR_COMMIT...",
+                                    errorMessage = null
+                                )
+                                store.savePeer(
+                                    com.linkme.androidbridge.core.crypto.TrustedPeer(
+                                        deviceId = pending.peerId,
+                                        deviceName = hello.deviceName.ifBlank { pending.peerName },
+                                        pinnedCertSha256 = pending.pinnedCertSha256,
+                                        sharedBleSecret = pending.sharedBleSecret,
+                                        bluetoothSessionKey = pending.bluetoothSessionKey
+                                    )
+                                )
+                                val commitBytes = json.encodeToString(autoCommit).toByteArray(Charsets.UTF_8)
+                                val commitFrame = WireFrame(WireMessageType.PAIR_COMMIT, frame.sequenceId + 1L, commitBytes)
+                                blePeripheralManager?.sendControlFrame(commitFrame)
+                                BridgeActivityHub.appendWireEvent("TX 0x0F PAIR_COMMIT via BLE Notify")
+                            } else {
+                                BridgeActivityHub.updatePairingTrace(errorMessage = "Rejected PAIR_HELLO: pairToken mismatch")
+                            }
+                        }
+                    }
+            }
+
             WireMessageType.WAKE_WIFI -> {
                 runCatching { json.decodeFromString<WakeWifiPayload>(frame.payload.decodeToString()) }
                     .onSuccess { wake ->
@@ -913,6 +1003,7 @@ class BridgeForegroundService : Service() {
                                     bluetoothSessionKey = pending.bluetoothSessionKey
                                 )
                             )
+                            blePeripheralManager?.switchToTrustedBeacon(BlePrivacyBeacon(pending.sharedBleSecret))
                             BridgeActivityHub.completePairingSuccess(pending, ack)
                             BridgeActivityHub.onPeerTrustedUpdated?.invoke()
                         } else {
@@ -1000,16 +1091,16 @@ class BridgeForegroundService : Service() {
             WireMessageType.REMOTE_INPUT -> {
                 runCatching { json.decodeFromString<RemoteInputPayload>(frame.payload.decodeToString()) }
                     .onSuccess { input ->
-                        when (RemoteControlIpcBridge.dispatchRemoteInput(this, input)) {
-                            CursorControlAddonStatus.ACTIVE -> Unit
-                            CursorControlAddonStatus.COMPANION_NOT_INSTALLED -> {
+                        when (RemoteControlExecutor.executeRemoteInput(this, input)) {
+                            CursorControlStatus.SHIZUKU_ACTIVE -> Unit
+                            CursorControlStatus.SHIZUKU_PERMISSION_REQUIRED -> {
                                 BridgeActivityHub.updateMirrorState {
-                                    it.copy(statusText = "View active • Install Companion Add-on for Remote Cursor Control")
+                                    it.copy(statusText = "View active • Tap 1-Tap Enable via Shizuku in Mirror tab")
                                 }
                             }
-                            CursorControlAddonStatus.ACCESSIBILITY_DISABLED -> {
+                            CursorControlStatus.SHIZUKU_NOT_RUNNING -> {
                                 BridgeActivityHub.updateMirrorState {
-                                    it.copy(statusText = "View active • Enable Link-Me Cursor Control in Accessibility settings")
+                                    it.copy(statusText = "View active • Start Shizuku for Remote Cursor Control")
                                 }
                             }
                         }

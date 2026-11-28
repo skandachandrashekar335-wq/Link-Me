@@ -44,16 +44,93 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
     private let writeLock = NSLock()
     private var heartbeatTimer: DispatchSourceTimer?
     private var lastPingSentAt: Date?
+    private var activePairingToken: String?
+    private var activePairingTokenTag: Data?
+    private var pairingHelloBuilder: (@Sendable () -> WireFrame?)?
+    private var isPairingConnection: Bool = false
 
     public private(set) var isConnected: Bool = false
     public var onVerifiedPeerDiscovered: (@Sendable (TrustedPeer) -> Void)?
     public var onConnectionStateChanged: (@Sendable (Bool) -> Void)?
     public var onLatencyMeasured: (@Sendable (Int) -> Void)?
     public var onInboundFrame: (@Sendable (WireFrame) -> Void)?
+    public var onPairingStepChanged: (@Sendable (Int, String) -> Void)?
+    public var onDiagnosticEvent: (@Sendable (String) -> Void)?
 
     public init(trustStore: TrustStore) {
         self.trustStore = trustStore
         super.init()
+    }
+
+    public static func matchesPairingServiceData(_ serviceData: [CBUUID: Data], pairToken: String) -> Bool {
+        let expected = PairingCrypto.computeTokenTag(pairToken)
+        guard let actual = serviceData[Self.serviceUUID], actual.count == 4 else {
+            return false
+        }
+        return ConstantTime.equals(expected, actual)
+    }
+
+    public func startPairingDiscovery(
+        pairToken: String,
+        helloBuilder: @escaping @Sendable () -> WireFrame?
+    ) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.activePairingToken = pairToken
+            self.activePairingTokenTag = PairingCrypto.computeTokenTag(pairToken)
+            self.pairingHelloBuilder = helloBuilder
+            self.isPairingConnection = false
+            self.onDiagnosticEvent?("PAIR_SCAN_ARMED(tag=\(self.activePairingTokenTag?.hexString ?? ""))")
+            if self.centralManager == nil {
+                self.centralManager = CBCentralManager(
+                    delegate: self,
+                    queue: self.queue,
+                    options: [CBCentralManagerOptionRestoreIdentifierKey: "com.linkme.macbridge.central"]
+                )
+            } else if self.centralManager?.state == .poweredOn {
+                self.beginUnfilteredPairingScan()
+            } else if let st = self.centralManager?.state {
+                self.onPairingStepChanged?(1, "Mac Bluetooth is \(Self.stateLabel(st))")
+            }
+        }
+    }
+
+    public func stopPairingDiscovery() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.activePairingToken = nil
+            self.activePairingTokenTag = nil
+            self.pairingHelloBuilder = nil
+            self.isPairingConnection = false
+            if self.centralManager?.state == .poweredOn {
+                if ((try? self.trustStore.allPeers())?.isEmpty == false) {
+                    self.beginFilteredScan()
+                } else {
+                    self.centralManager?.stopScan()
+                }
+            }
+        }
+    }
+
+    private func beginUnfilteredPairingScan() {
+        centralManager?.stopScan()
+        centralManager?.scanForPeripherals(
+            withServices: nil,
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+        )
+        onDiagnosticEvent?("PAIR_SCAN_START(allowDuplicates=true)")
+    }
+
+    private static func stateLabel(_ state: CBManagerState) -> String {
+        switch state {
+        case .poweredOn: return "PoweredOn"
+        case .poweredOff: return "Off"
+        case .unauthorized: return "Unauthorized"
+        case .unsupported: return "Unsupported"
+        case .resetting: return "Resetting"
+        case .unknown: return "Unknown"
+        @unknown default: return "State(\(state.rawValue))"
+        }
     }
 
     public func startScanning() {
@@ -172,8 +249,16 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
     }
 
     public func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        let label = Self.stateLabel(central.state)
+        onDiagnosticEvent?("CENTRAL_STATE: \(label)")
         if central.state == .poweredOn {
-            beginFilteredScan()
+            if activePairingTokenTag != nil {
+                beginUnfilteredPairingScan()
+            } else {
+                beginFilteredScan()
+            }
+        } else if activePairingTokenTag != nil {
+            onPairingStepChanged?(1, "Mac Bluetooth is \(label)")
         }
     }
 
@@ -183,6 +268,19 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
         advertisementData: [String: Any],
         rssi RSSI: NSNumber
     ) {
+        if let pairToken = activePairingToken,
+           let serviceData = advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data],
+           Self.matchesPairingServiceData(serviceData, pairToken: pairToken) {
+            isPairingConnection = true
+            connectedPeripheral = peripheral
+            peripheral.delegate = self
+            onPairingStepChanged?(2, "BLE Peripheral Linked (RSSI \(RSSI) dBm)")
+            onDiagnosticEvent?("PAIR_PERIPHERAL_FOUND(rssi=\(RSSI))")
+            central.stopScan()
+            central.connect(peripheral, options: nil)
+            return
+        }
+
         guard let peers = try? trustStore.allPeers(), !peers.isEmpty else { return }
         let matchedPeer: TrustedPeer?
         if let serviceData = advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data],
@@ -207,6 +305,10 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
     public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         isConnected = true
         onConnectionStateChanged?(true)
+        if isPairingConnection {
+            onPairingStepChanged?(2, "Connected GATT — Discovering Services")
+        }
+        onDiagnosticEvent?("CENTRAL_DID_CONNECT(\(peripheral.identifier.uuidString.prefix(8)))")
         peripheral.discoverServices([Self.serviceUUID])
         startHeartbeat()
     }
@@ -227,11 +329,19 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
             heartbeatTimer = nil
         }
         if central.state == .poweredOn {
-            beginFilteredScan()
+            if activePairingTokenTag != nil {
+                beginUnfilteredPairingScan()
+            } else if ((try? trustStore.allPeers())?.isEmpty == false) {
+                beginFilteredScan()
+            }
         }
     }
 
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        if let error {
+            onDiagnosticEvent?("CENTRAL_DISCOVER_SERVICES_ERR: \(error.localizedDescription)")
+            return
+        }
         guard let service = peripheral.services?.first(where: { $0.uuid == Self.serviceUUID }) else { return }
         peripheral.discoverCharacteristics(
             [Self.controlWriteCharUUID, Self.controlNotifyCharUUID, Self.l2capPsmCharUUID],
@@ -244,6 +354,10 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
         didDiscoverCharacteristicsFor service: CBService,
         error: Error?
     ) {
+        if let error {
+            onDiagnosticEvent?("CENTRAL_DISCOVER_CHARS_ERR: \(error.localizedDescription)")
+            return
+        }
         for char in service.characteristics ?? [] {
             if char.uuid == Self.controlWriteCharUUID {
                 writeCharacteristic = char
@@ -251,6 +365,30 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
                 peripheral.setNotifyValue(true, for: char)
             } else if char.uuid == Self.l2capPsmCharUUID {
                 peripheral.readValue(for: char)
+            }
+        }
+    }
+
+    public func peripheral(
+        _ peripheral: CBPeripheral,
+        didUpdateNotificationStateFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        guard characteristic.uuid == Self.controlNotifyCharUUID else { return }
+        if let error {
+            onDiagnosticEvent?("CENTRAL_CCCD_ERR: \(error.localizedDescription)")
+            if isPairingConnection {
+                onPairingStepChanged?(2, "BLE Notify Error: \(error.localizedDescription)")
+            }
+            return
+        }
+        onDiagnosticEvent?("CENTRAL_CCCD_READY(isNotifying=\(characteristic.isNotifying))")
+        if characteristic.isNotifying && isPairingConnection {
+            isPairingConnection = false
+            onPairingStepChanged?(3, "BLE Key Exchange (Sending PAIR_HELLO)")
+            if let helloFrame = pairingHelloBuilder?() {
+                sendControlFrame(helloFrame)
+                onDiagnosticEvent?("TX 0x01 PAIR_HELLO via BLE GATT")
             }
         }
     }

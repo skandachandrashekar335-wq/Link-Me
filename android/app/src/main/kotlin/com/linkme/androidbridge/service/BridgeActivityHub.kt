@@ -114,6 +114,9 @@ object BridgeActivityHub {
     private val _mirrorState = MutableStateFlow(ScreenMirrorUiState())
     val mirrorState: StateFlow<ScreenMirrorUiState> = _mirrorState.asStateFlow()
 
+    private val _stealthBlackActive = MutableStateFlow(false)
+    val stealthBlackActive: StateFlow<Boolean> = _stealthBlackActive.asStateFlow()
+
     private val _pairingStatus = MutableStateFlow<PairingCommitStatus>(PairingCommitStatus.Idle)
     val pairingStatus: StateFlow<PairingCommitStatus> = _pairingStatus.asStateFlow()
 

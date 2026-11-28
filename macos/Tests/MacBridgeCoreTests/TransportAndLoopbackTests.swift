@@ -707,13 +707,20 @@ struct TransportAndLoopbackTests {
         actor RouteTracker {
             var wifiAttempts = 0
             var bleCount = 0
+            var wakeCount = 0
             func incWifi() { wifiAttempts += 1 }
-            func incBle() { bleCount += 1 }
+            func recordBle(_ msgType: WireMessageType) {
+                if msgType == .wakeWifi {
+                    wakeCount += 1
+                } else {
+                    bleCount += 1
+                }
+            }
         }
         let rt = RouteTracker()
         let mgr = TransportManager(cooldownDurationSeconds: 0.2)
         await mgr.configureTransportHooks(
-            bleSender: { _ in await rt.incBle() },
+            bleSender: { frame in await rt.recordBle(frame.messageType) },
             wifiOpener: { return 49152 },
             wifiSender: { _ in
                 await rt.incWifi()
@@ -728,6 +735,7 @@ struct TransportAndLoopbackTests {
         }
         // Only the 1st call attempts Wi-Fi before 8s backoff; subsequent calls go straight to BLE
         #expect(await rt.wifiAttempts == 1)
+        #expect(await rt.wakeCount == 1)
         #expect(await rt.bleCount == 3)
 
         // 4. FILE_OFFER -> FILE_RESPONSE(accepted=true) -> adaptive 2048B FILE_CHUNK -> disk verification

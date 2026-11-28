@@ -260,7 +260,7 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
         didWriteValueFor characteristic: CBCharacteristic,
         error: Error?
     ) {
-        writeLock.withLock {
+        _ = writeLock.withLock {
             characteristicWriteSem?.signal()
         }
     }

@@ -706,9 +706,16 @@ class TransportAndLoopbackTest {
         // 2. BLE-only resilient fallback with Wi-Fi backoff avoids repeated Wi-Fi dial stalls
         val wifiCalls = AtomicInteger(0)
         val bleCalls = AtomicInteger(0)
+        val wakeCalls = AtomicInteger(0)
         val router = TransportManager(
             cooldownDurationMs = 200L,
-            bleSender = { bleCalls.incrementAndGet() },
+            bleSender = { frame ->
+                if (frame.messageType == WireMessageType.WAKE_WIFI) {
+                    wakeCalls.incrementAndGet()
+                } else {
+                    bleCalls.incrementAndGet()
+                }
+            },
             wifiOpener = { 49152 },
             wifiSender = {
                 wifiCalls.incrementAndGet()
@@ -725,6 +732,7 @@ class TransportAndLoopbackTest {
                 )
             }
             assertEquals(1, wifiCalls.get())
+            assertEquals(1, wakeCalls.get())
             assertEquals(3, bleCalls.get())
         } finally {
             router.shutdown()

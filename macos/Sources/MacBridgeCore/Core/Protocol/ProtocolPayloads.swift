@@ -63,6 +63,12 @@ public struct PingTelemetryPayload: Codable, Sendable, Equatable {
     public let batterySaverActive: Bool
     public let transportState: BridgeState
     public let timestampMs: UInt64
+    public let pingNonce: String?
+    public let isPong: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case msgType, deviceId, batteryLevel, isCharging, batterySaverActive, transportState, timestampMs, pingNonce, isPong
+    }
 
     public init(
         deviceId: String,
@@ -70,7 +76,9 @@ public struct PingTelemetryPayload: Codable, Sendable, Equatable {
         isCharging: Bool,
         batterySaverActive: Bool,
         transportState: BridgeState,
-        timestampMs: UInt64
+        timestampMs: UInt64,
+        pingNonce: String? = nil,
+        isPong: Bool = false
     ) {
         self.msgType = "PING_TELEMETRY"
         self.deviceId = deviceId
@@ -79,6 +87,21 @@ public struct PingTelemetryPayload: Codable, Sendable, Equatable {
         self.batterySaverActive = batterySaverActive
         self.transportState = transportState
         self.timestampMs = timestampMs
+        self.pingNonce = pingNonce
+        self.isPong = isPong
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.msgType = try c.decodeIfPresent(String.self, forKey: .msgType) ?? "PING_TELEMETRY"
+        self.deviceId = try c.decode(String.self, forKey: .deviceId)
+        self.batteryLevel = min(100, max(0, try c.decode(Int.self, forKey: .batteryLevel)))
+        self.isCharging = try c.decode(Bool.self, forKey: .isCharging)
+        self.batterySaverActive = try c.decodeIfPresent(Bool.self, forKey: .batterySaverActive) ?? false
+        self.transportState = try c.decode(BridgeState.self, forKey: .transportState)
+        self.timestampMs = try c.decode(UInt64.self, forKey: .timestampMs)
+        self.pingNonce = try c.decodeIfPresent(String.self, forKey: .pingNonce)
+        self.isPong = try c.decodeIfPresent(Bool.self, forKey: .isPong) ?? false
     }
 }
 

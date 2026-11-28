@@ -4,22 +4,31 @@ import Foundation
 public struct BlePeripheralDiagnostics: Sendable, Equatable {
     public let isPoweredOn: Bool
     public let isAdvertising: Bool
+    public let radioStateLabel: String
+    public let linkStateLabel: String
     public let subscribedCentralsCount: Int
     public let l2capPsm: UInt16?
     public let lastStatusMessage: String
+    public let eventLog: [String]
 
     public init(
         isPoweredOn: Bool = false,
         isAdvertising: Bool = false,
+        radioStateLabel: String = "Unknown",
+        linkStateLabel: String = "Idle",
         subscribedCentralsCount: Int = 0,
         l2capPsm: UInt16? = nil,
-        lastStatusMessage: String = "Idle"
+        lastStatusMessage: String = "Idle",
+        eventLog: [String] = []
     ) {
         self.isPoweredOn = isPoweredOn
         self.isAdvertising = isAdvertising
+        self.radioStateLabel = radioStateLabel
+        self.linkStateLabel = linkStateLabel
         self.subscribedCentralsCount = subscribedCentralsCount
         self.l2capPsm = l2capPsm
         self.lastStatusMessage = lastStatusMessage
+        self.eventLog = eventLog
     }
 }
 
@@ -50,6 +59,12 @@ public final class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate, 
     private var subscribedCentrals: [CBCentral] = []
     private var pendingNotifyQueue: [Data] = []
     private var activeL2CapChannel: CBL2CAPChannel?
+    private var eventRing: [String] = []
+    private static let eventTimeFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateFormat = "HH:mm:ss.SSS"
+        return df
+    }()
 
     public private(set) var diagnostics = BlePeripheralDiagnostics()
     public var onDiagnosticsChanged: (@Sendable (BlePeripheralDiagnostics) -> Void)?
@@ -114,9 +129,12 @@ public final class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate, 
 
     private func drainPendingNotifyQueue(pm: CBPeripheralManager, char: CBMutableCharacteristic) {
         while let next = pendingNotifyQueue.first {
-            if pm.updateValue(next, for: char, onSubscribedCentrals: nil) {
+            let ok = pm.updateValue(next, for: char, onSubscribedCentrals: nil)
+            if ok {
                 pendingNotifyQueue.removeFirst()
+                recordPeripheralEvent("updateValue(bytes=\(next.count), ok=true)")
             } else {
+                recordPeripheralEvent("updateValue(bytes=\(next.count), ok=false_queued)")
                 break
             }
         }
@@ -186,21 +204,41 @@ public final class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate, 
             let service = CBMutableService(type: Self.serviceUUID, primary: true)
             service.characteristics = [rxChar, txChar, psmChar, infoChar]
             pm.add(service)
-            pm.publishL2CAPChannel(withEncryption: true)
             serviceAdded = true
-        }
-        if !pm.isAdvertising {
-            // Keep primary BLE advertisement strictly <= 28 bytes (Service UUID only); expose name via GATT read
+            updateDiagnostics(isPoweredOn: true, radioStateLabel: "PoweredOn", linkStateLabel: "Registering Service", message: "Adding GATT 414D0001")
+        } else if !pm.isAdvertising {
             pm.startAdvertising([
                 CBAdvertisementDataServiceUUIDsKey: [Self.serviceUUID]
             ])
         }
-        updateDiagnostics(isPoweredOn: true, isAdvertising: true, message: "BLE GATT Peripheral Active")
+    }
+
+    private func recordPeripheralEvent(_ text: String) {
+        let stamp = Self.eventTimeFormatter.string(from: Date())
+        eventRing.insert("[\(stamp)] \(text)", at: 0)
+        if eventRing.count > 40 {
+            eventRing.removeLast(eventRing.count - 40)
+        }
+        updateDiagnostics()
+    }
+
+    private static func stateName(_ state: CBManagerState) -> String {
+        switch state {
+        case .poweredOn: return "PoweredOn"
+        case .poweredOff: return "Off"
+        case .unauthorized: return "Unauthorized"
+        case .unsupported: return "Unsupported"
+        case .resetting: return "Resetting"
+        case .unknown: return "Unknown"
+        @unknown default: return "State(\(state.rawValue))"
+        }
     }
 
     private func updateDiagnostics(
         isPoweredOn: Bool? = nil,
         isAdvertising: Bool? = nil,
+        radioStateLabel: String? = nil,
+        linkStateLabel: String? = nil,
         subscribers: Int? = nil,
         l2capPsm: UInt16? = nil,
         message: String? = nil
@@ -208,9 +246,12 @@ public final class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate, 
         let updated = BlePeripheralDiagnostics(
             isPoweredOn: isPoweredOn ?? diagnostics.isPoweredOn,
             isAdvertising: isAdvertising ?? diagnostics.isAdvertising,
+            radioStateLabel: radioStateLabel ?? diagnostics.radioStateLabel,
+            linkStateLabel: linkStateLabel ?? diagnostics.linkStateLabel,
             subscribedCentralsCount: subscribers ?? diagnostics.subscribedCentralsCount,
             l2capPsm: l2capPsm ?? diagnostics.l2capPsm,
-            lastStatusMessage: message ?? diagnostics.lastStatusMessage
+            lastStatusMessage: message ?? diagnostics.lastStatusMessage,
+            eventLog: eventRing
         )
         diagnostics = updated
         onDiagnosticsChanged?(updated)
@@ -219,22 +260,44 @@ public final class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate, 
     // MARK: - CBPeripheralManagerDelegate
 
     public func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
+        let label = Self.stateName(peripheral.state)
+        recordPeripheralEvent("CBManagerState: \(label)")
         if peripheral.state == .poweredOn {
+            updateDiagnostics(isPoweredOn: true, radioStateLabel: label)
             configureAndAdvertise()
         } else {
             updateDiagnostics(
                 isPoweredOn: false,
                 isAdvertising: false,
-                message: "Bluetooth state: \(peripheral.state.rawValue)"
+                radioStateLabel: label,
+                linkStateLabel: "Radio \(label)",
+                message: "Bluetooth state: \(label)"
             )
+        }
+    }
+
+    public func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
+        if let error {
+            recordPeripheralEvent("didAdd service error: \(error.localizedDescription)")
+            updateDiagnostics(isAdvertising: false, linkStateLabel: "Error (didAdd)", message: "didAdd error: \(error.localizedDescription)")
+            return
+        }
+        recordPeripheralEvent("didAdd service(414D0001)")
+        peripheral.publishL2CAPChannel(withEncryption: true)
+        if !peripheral.isAdvertising {
+            peripheral.startAdvertising([
+                CBAdvertisementDataServiceUUIDsKey: [Self.serviceUUID]
+            ])
         }
     }
 
     public func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
         if let error {
-            updateDiagnostics(isAdvertising: false, message: "Adv error: \(error.localizedDescription)")
+            recordPeripheralEvent("advertisingStarted error: \(error.localizedDescription)")
+            updateDiagnostics(isAdvertising: false, linkStateLabel: "Error (Advertising)", message: "Adv error: \(error.localizedDescription)")
         } else {
-            updateDiagnostics(isAdvertising: true, message: "Advertising GATT + Pairing")
+            recordPeripheralEvent("advertisingStarted(414D0001)")
+            updateDiagnostics(isAdvertising: true, linkStateLabel: subscribedCentrals.isEmpty ? "Advertising" : "GATT Connected", message: "Advertising GATT + Pairing")
         }
     }
 
@@ -275,7 +338,8 @@ public final class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate, 
         if !subscribedCentrals.contains(where: { $0.identifier == central.identifier }) {
             subscribedCentrals.append(central)
         }
-        updateDiagnostics(subscribers: subscribedCentrals.count, message: "Android subscribed over GATT")
+        recordPeripheralEvent("didSubscribeTo central(mtu=\(central.maximumUpdateValueLength + 3))")
+        updateDiagnostics(linkStateLabel: "GATT Connected + CCCD Ready", subscribers: subscribedCentrals.count, message: "Android subscribed over GATT")
     }
 
     public func peripheralManager(
@@ -285,7 +349,8 @@ public final class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate, 
     ) {
         subscribedCentrals.removeAll { $0.identifier == central.identifier }
         reassembler.reset()
-        updateDiagnostics(subscribers: subscribedCentrals.count, message: "Subscriber disconnected")
+        recordPeripheralEvent("didUnsubscribeFrom central")
+        updateDiagnostics(linkStateLabel: peripheral.isAdvertising ? "Advertising" : "Idle", subscribers: subscribedCentrals.count, message: "Subscriber disconnected")
     }
 
     public func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveRead request: CBATTRequest) {
@@ -316,9 +381,11 @@ public final class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate, 
         for req in requests {
             guard req.characteristic.uuid == Self.rxWriteCharUUID,
                   let data = req.value else {
+                recordPeripheralEvent("didReceiveWrite rejected(\(req.characteristic.uuid))")
                 peripheral.respond(to: req, withResult: .attributeNotFound)
                 continue
             }
+            recordPeripheralEvent("didReceiveWrite(bytes=\(data.count))")
             if data.first == BluetoothPacketCodec.dataTag {
                 let (_, assembled, ack) = reassembler.ingest(data)
                 if let ack, let txChar = txNotifyChar {

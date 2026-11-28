@@ -23,12 +23,18 @@ import com.linkme.androidbridge.core.protocol.FrameEncoder
 import com.linkme.androidbridge.core.protocol.ReplayGuard
 import com.linkme.androidbridge.core.protocol.WireFrame
 import com.linkme.androidbridge.core.protocol.WireMessageType
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -39,20 +45,28 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
+data class BleDiagnosticSnapshot(
+    val bleRadioState: String = "Unknown",
+    val bleLinkState: String = "Idle",
+    val events: List<String> = emptyList()
+)
+
 /**
  * Serialized BLE GATT Client + L2CAP CoC client connecting to MacBridge (`414D0001-...`).
  * Enforces:
- * 1. `requestMtu(512)` -> `onMtuChanged` -> `discoverServices()` -> CCCD -> PSM read -> Ready.
- * 2. All outbound GATT characteristic writes strictly serialized via a single writer queue
- *    awaiting `onCharacteristicWrite` (2000ms watchdog timeout) so Samsung/Android stacks never drop packets.
- * 3. `SCAN_MODE_LOW_LATENCY` with unfiltered UUID scan-record fallback if hardware filtering misses Mac.
+ * 1. `requestMtu(512)` -> `onMtuChanged` -> `discoverServices()` -> explicit `setCharacteristicNotification`
+ *    + `00002902-...` CCCD `ENABLE_NOTIFICATION_VALUE` write -> `onDescriptorWrite(GATT_SUCCESS)` -> PSM read -> Ready.
+ * 2. All outbound GATT characteristic writes (`PAIR_COMMIT`, etc.) blocked/queued behind `onDescriptorWrite`
+ *    `GATT_SUCCESS` and strictly serialized via a single writer executor awaiting `onCharacteristicWrite`.
+ * 3. `SCAN_MODE_LOW_LATENCY` with unfiltered UUID scan-record fallback + live diagnostic StateFlows.
  */
 class BleGattClient(
     private val context: Context,
     private val trustStore: TrustStore,
     private val onInboundFrame: ((WireFrame) -> Unit)? = null,
     private val onConnectionChanged: ((Boolean) -> Unit)? = null,
-    private val onLatencyMeasured: ((Int) -> Unit)? = null
+    private val onLatencyMeasured: ((Int) -> Unit)? = null,
+    private val onDiagnosticEvent: ((String) -> Unit)? = null
 ) {
     private val scheduler = Executors.newSingleThreadScheduledExecutor()
     private val writeExecutor = Executors.newSingleThreadExecutor()
@@ -63,9 +77,18 @@ class BleGattClient(
     private val json = Json { ignoreUnknownKeys = true }
     private val pendingHandshakeQueue = ConcurrentLinkedQueue<WireFrame>()
     private val ackWaiters = ConcurrentHashMap<Long, CountDownLatch>()
+    private val diagLock = Any()
+
+    private val _diagnostics = MutableStateFlow(BleDiagnosticSnapshot(bleRadioState = readAdapterStateLabel()))
+    val diagnostics: StateFlow<BleDiagnosticSnapshot> = _diagnostics.asStateFlow()
+
+    private val _diagnosticEvents = MutableStateFlow<List<String>>(emptyList())
+    val diagnosticEvents: StateFlow<List<String>> = _diagnosticEvents.asStateFlow()
 
     @Volatile private var activeWriteLatch: CountDownLatch? = null
     @Volatile private var activeWriteStatus: Int = BluetoothGatt.GATT_FAILURE
+    @Volatile private var cccdEnabled: Boolean = false
+    @Volatile private var cccdWaitLatch: CountDownLatch? = null
     private val servicesDiscovered = AtomicBoolean(false)
     private var scanFallbackFuture: ScheduledFuture<*>? = null
     private var mtuFallbackFuture: ScheduledFuture<*>? = null
@@ -90,29 +113,79 @@ class BleGattClient(
     var isGattReady: Boolean = false
         private set
 
+    val isCccdReady: Boolean
+        get() = cccdEnabled
+
     val currentNegotiatedMtu: Int
         get() = negotiatedMtu
+
+    private fun readAdapterStateLabel(): String {
+        return runCatching {
+            val mgr = context.getSystemService(BluetoothManager::class.java)
+            val adapter = mgr?.adapter ?: return@runCatching "Unavailable"
+            when (adapter.state) {
+                android.bluetooth.BluetoothAdapter.STATE_ON -> "PoweredOn"
+                android.bluetooth.BluetoothAdapter.STATE_OFF -> "Off"
+                android.bluetooth.BluetoothAdapter.STATE_TURNING_ON,
+                android.bluetooth.BluetoothAdapter.STATE_TURNING_OFF -> "Transitioning"
+                else -> "Unknown"
+            }
+        }.getOrElse { "Unauthorized" }
+    }
+
+    fun refreshRadioState(): String {
+        val radio = readAdapterStateLabel()
+        synchronized(diagLock) {
+            _diagnostics.value = _diagnostics.value.copy(bleRadioState = radio)
+        }
+        return radio
+    }
+
+    private fun recordDiagnostic(
+        event: String,
+        linkState: String? = null,
+        radioState: String? = null
+    ) {
+        val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
+        val line = "[$ts] $event"
+        synchronized(diagLock) {
+            val updatedEvents = (listOf(line) + _diagnosticEvents.value).take(40)
+            _diagnosticEvents.value = updatedEvents
+            val cur = _diagnostics.value
+            _diagnostics.value = cur.copy(
+                bleRadioState = radioState ?: cur.bleRadioState,
+                bleLinkState = linkState ?: cur.bleLinkState,
+                events = updatedEvents
+            )
+        }
+        onDiagnosticEvent?.invoke(line)
+    }
 
     @SuppressLint("MissingPermission")
     fun sendPairingHelloOverBle(pairHelloFrame: WireFrame) = sendPairingFrameOverBle(pairHelloFrame)
 
     @SuppressLint("MissingPermission")
     fun sendPairingFrameOverBle(frame: WireFrame) {
-        if (isConnected && isGattReady && rxWriteChar != null) {
+        if (isConnected && cccdEnabled && isGattReady && rxWriteChar != null) {
             if (sendFrame(frame)) return
         }
         pendingHandshakeQueue.offer(frame)
         if (!isConnected) {
             startScanning(autoReconnect = false)
-        } else if (isGattReady && rxWriteChar != null) {
+        } else if (cccdEnabled && isGattReady && rxWriteChar != null) {
             scheduler.execute { flushPendingHandshake() }
         }
     }
 
     @SuppressLint("MissingPermission")
     fun startScanning(autoReconnect: Boolean = true) {
-        val manager = context.getSystemService(BluetoothManager::class.java) ?: return
-        val scanner = manager.adapter?.bluetoothLeScanner ?: return
+        val radio = refreshRadioState()
+        val manager = context.getSystemService(BluetoothManager::class.java)
+        val scanner = manager?.adapter?.bluetoothLeScanner
+        if (scanner == null) {
+            recordDiagnostic("GATT_ERROR(scanner_unavailable:$radio)", linkState = "Radio $radio", radioState = radio)
+            return
+        }
         stopScanning()
 
         val filter = ScanFilter.Builder()
@@ -127,11 +200,17 @@ class BleGattClient(
                 val uuids = result.scanRecord?.serviceUuids.orEmpty()
                 val matchesUuid = uuids.any { it.uuid == BlePeripheralManager.SERVICE_UUID }
                 if (!matchesUuid) return
+                recordDiagnostic("DEVICE_FOUND(rssi=${result.rssi}, addr=${result.device.address})")
                 stopScanning()
                 connectToDevice(result.device, autoConnect = autoReconnect)
             }
+
+            override fun onScanFailed(errorCode: Int) {
+                recordDiagnostic("GATT_ERROR(scan_failed=$errorCode)", linkState = "Error (Scan=$errorCode)")
+            }
         }
         scanCallback = cb
+        recordDiagnostic("SCAN_START(filter=414D0001)", linkState = "Scanning", radioState = radio)
         scanner.startScan(listOf(filter), settings, cb)
 
         // Fallback unfiltered scan in case OEM controller misses 128-bit UUID hardware filter
@@ -143,12 +222,18 @@ class BleGattClient(
                         override fun onScanResult(callbackType: Int, result: ScanResult) {
                             val uuids = result.scanRecord?.serviceUuids.orEmpty()
                             if (uuids.any { it.uuid == BlePeripheralManager.SERVICE_UUID }) {
+                                recordDiagnostic("DEVICE_FOUND(rssi=${result.rssi}, addr=${result.device.address}, fallback=true)")
                                 stopScanning()
                                 connectToDevice(result.device, autoConnect = autoReconnect)
                             }
                         }
+
+                        override fun onScanFailed(errorCode: Int) {
+                            recordDiagnostic("GATT_ERROR(fallback_scan=$errorCode)", linkState = "Error (Scan=$errorCode)")
+                        }
                     }
                     scanCallback = fallbackCb
+                    recordDiagnostic("SCAN_START(unfiltered_fallback)", linkState = "Scanning (Fallback)")
                     runCatching { scanner.startScan(null, settings, fallbackCb) }
                 }
             },
@@ -170,8 +255,11 @@ class BleGattClient(
 
     @SuppressLint("MissingPermission")
     fun connectToDevice(device: BluetoothDevice, autoConnect: Boolean = true) {
+        cccdEnabled = false
+        cccdWaitLatch = CountDownLatch(1)
         isGattReady = false
         servicesDiscovered.set(false)
+        recordDiagnostic("GATT_CONNECTING(addr=${device.address})", linkState = "Connecting")
         gatt?.close()
         gatt = device.connectGatt(context, autoConnect, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
@@ -198,18 +286,26 @@ class BleGattClient(
                     out.write(envelope)
                     out.flush()
                 }
+                recordDiagnostic("TX_BYTES(${envelope.size}, via=L2CAP)")
                 true
             }.getOrDefault(false)
             if (l2capOk) return true
         }
 
         val client = gatt ?: return false
-        val char = rxWriteChar ?: return false
         val pid = packetSeq.getAndIncrement()
         val packets = BluetoothPacketCodec.packetize(envelope, pid, negotiatedMtu)
 
-        // Dispatch strictly serialized via single writer executor awaiting onCharacteristicWrite
+        // Block strictly until CCCD onDescriptorWrite(GATT_SUCCESS) finishes, then serialize via single writer
         val job = writeExecutor.submit<Boolean> {
+            if (!cccdEnabled) {
+                runCatching { cccdWaitLatch?.await(3000L, TimeUnit.MILLISECONDS) }
+            }
+            val char = rxWriteChar
+            if (!cccdEnabled || !isGattReady || char == null) {
+                recordDiagnostic("GATT_ERROR(write_blocked_cccd=${cccdEnabled}_ready=${isGattReady})")
+                return@submit false
+            }
             val ackLatch = if (packets.size > 1) CountDownLatch(1).also { ackWaiters[pid] = it } else null
             var allOk = true
             for (pkt in packets) {
@@ -250,14 +346,22 @@ class BleGattClient(
         }
         if (!queued) {
             activeWriteLatch = null
+            recordDiagnostic("GATT_ERROR(tx_queue_rejected)")
             return false
         }
         val completed = runCatching { latch.await(2000L, TimeUnit.MILLISECONDS) }.getOrDefault(false)
         activeWriteLatch = null
-        return completed && activeWriteStatus == BluetoothGatt.GATT_SUCCESS
+        val ok = completed && activeWriteStatus == BluetoothGatt.GATT_SUCCESS
+        if (ok) {
+            recordDiagnostic("TX_BYTES(${data.size})")
+        } else {
+            recordDiagnostic("GATT_ERROR(tx_status=${if (completed) activeWriteStatus else -1})")
+        }
+        return ok
     }
 
     private fun flushPendingHandshake() {
+        if (!cccdEnabled || !isGattReady) return
         while (true) {
             val next = pendingHandshakeQueue.peek() ?: break
             if (sendFrame(next)) {
@@ -272,7 +376,7 @@ class BleGattClient(
         heartbeatFuture?.cancel(false)
         heartbeatFuture = scheduler.scheduleAtFixedRate(
             {
-                if (!isConnected || !isGattReady) return@scheduleAtFixedRate
+                if (!isConnected || !isGattReady || !cccdEnabled) return@scheduleAtFixedRate
                 val nowMs = System.currentTimeMillis()
                 lastPingSentMs = nowMs
                 val cmd = DeviceCommandPayload(command = "btPing", timestampMs = nowMs)
@@ -290,8 +394,11 @@ class BleGattClient(
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
                 isConnected = true
+                cccdEnabled = false
+                cccdWaitLatch = CountDownLatch(1)
                 isGattReady = false
                 servicesDiscovered.set(false)
+                recordDiagnostic("GATT_CONNECTED", linkState = "GATT Connected", radioState = refreshRadioState())
                 onConnectionChanged?.invoke(true)
 
                 // Negotiate MTU=512 BEFORE discovering services
@@ -315,6 +422,8 @@ class BleGattClient(
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
                 mtuFallbackFuture?.cancel(false)
                 isConnected = false
+                cccdEnabled = false
+                cccdWaitLatch?.countDown()
                 isGattReady = false
                 servicesDiscovered.set(false)
                 rxWriteChar = null
@@ -324,6 +433,8 @@ class BleGattClient(
                 activeWriteLatch = null
                 reassembler.reset()
                 heartbeatFuture?.cancel(false)
+                val linkDesc = if (status == BluetoothGatt.GATT_SUCCESS) "Disconnected" else "Error (status=$status)"
+                recordDiagnostic("GATT_ERROR(status=$status, state=$newState)", linkState = linkDesc, radioState = refreshRadioState())
                 onConnectionChanged?.invoke(false)
             }
         }
@@ -332,6 +443,7 @@ class BleGattClient(
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             mtuFallbackFuture?.cancel(false)
             negotiatedMtu = mtu.coerceIn(23, 512)
+            recordDiagnostic("MTU_NEGOTIATED(mtu=$negotiatedMtu, status=$status)")
             if (servicesDiscovered.compareAndSet(false, true)) {
                 gatt.discoverServices()
             }
@@ -339,11 +451,19 @@ class BleGattClient(
 
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            if (status != BluetoothGatt.GATT_SUCCESS) return
-            val service = gatt.getService(BlePeripheralManager.SERVICE_UUID) ?: return
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                recordDiagnostic("GATT_ERROR(discover=$status)", linkState = "Error (Discover=$status)")
+                return
+            }
+            val service = gatt.getService(BlePeripheralManager.SERVICE_UUID)
+            if (service == null) {
+                recordDiagnostic("GATT_ERROR(service_414D0001_missing)", linkState = "Error (Missing Service)")
+                return
+            }
             rxWriteChar = service.getCharacteristic(BlePeripheralManager.CONTROL_WRITE_CHAR_UUID)
             txNotifyChar = service.getCharacteristic(BlePeripheralManager.CONTROL_NOTIFY_CHAR_UUID)
             l2capPsmChar = service.getCharacteristic(BlePeripheralManager.L2CAP_PSM_CHAR_UUID)
+            recordDiagnostic("SERVICES_DISCOVERED")
 
             val notifyChar = txNotifyChar
             if (notifyChar != null) {
@@ -358,10 +478,15 @@ class BleGattClient(
                         @Suppress("DEPRECATION")
                         gatt.writeDescriptor(cccd)
                     }
-                    if (queued) return
+                    if (!queued) {
+                        recordDiagnostic("GATT_ERROR(cccd_write_queue_failed)", linkState = "Error (CCCD Queue Failed)")
+                    }
+                    return
                 }
+                recordDiagnostic("GATT_ERROR(cccd_descriptor_missing)", linkState = "Error (CCCD Missing)")
+                return
             }
-            readPsmOrMarkReady(gatt)
+            recordDiagnostic("GATT_ERROR(tx_notify_char_missing)", linkState = "Error (Missing TX Char)")
         }
 
         override fun onDescriptorWrite(
@@ -369,6 +494,15 @@ class BleGattClient(
             descriptor: BluetoothGattDescriptor,
             status: Int
         ) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                cccdEnabled = false
+                cccdWaitLatch?.countDown()
+                recordDiagnostic("GATT_ERROR(cccd_status=$status)", linkState = "Error (CCCD=$status)")
+                return
+            }
+            cccdEnabled = true
+            cccdWaitLatch?.countDown()
+            recordDiagnostic("CCCD_ENABLED", linkState = "GATT Connected + CCCD Ready")
             readPsmOrMarkReady(gatt)
         }
 
@@ -382,6 +516,7 @@ class BleGattClient(
         }
 
         private fun markReadyAndFlush() {
+            if (!cccdEnabled) return
             isGattReady = true
             startHeartbeat()
             scheduler.execute { flushPendingHandshake() }
@@ -433,12 +568,14 @@ class BleGattClient(
                     val sock = device.createInsecureL2capChannel(psm)
                     sock.connect()
                     l2capSocket = sock
+                    recordDiagnostic("L2CAP_CONNECTED(psm=$psm)")
                     val input = DataInputStream(sock.inputStream)
                     while (sock.isConnected) {
                         val len = input.readInt()
                         if (len <= 0 || len > WireFrame.MAX_CONTROL_FRAME_BYTES + 128) break
                         val buf = ByteArray(len)
                         input.readFully(buf)
+                        recordDiagnostic("RX_BYTES($len, via=L2CAP)")
                         decodeAndDeliver(buf)
                     }
                 }
@@ -464,6 +601,7 @@ class BleGattClient(
 
         private fun handleNotifyValue(value: ByteArray) {
             if (value.isEmpty()) return
+            recordDiagnostic("RX_BYTES(${value.size})")
             if (value[0] == BluetoothPacketCodec.ACK_TAG) {
                 BluetoothPacketCodec.AckPacket.decode(value)?.let { ack ->
                     ackWaiters[ack.packetId]?.countDown()

@@ -793,5 +793,37 @@ class TransportAndLoopbackTest {
         )
         val decodedCtrl = Json.decodeFromString<ScreenControlPayload>(Json.encodeToString(ctrl))
         assertTrue(decodedCtrl.wake && decodedCtrl.stealthBlack && decodedCtrl.fps == 60)
+
+        // 5. v2.0.1 0x01 Ping/Pong telemetry round-trip + RadioDiagnosticsUiState report
+        val wireJson = Json { encodeDefaults = true; ignoreUnknownKeys = true }
+        val ping01 = PingTelemetryPayload(
+            deviceId = androidId.deviceId,
+            batteryLevel = 81,
+            isCharging = true,
+            batterySaverActive = false,
+            transportState = BridgeState.DORMANT_BLE,
+            timestampMs = 1_770_000_200L,
+            pingNonce = "feed1234",
+            isPong = true
+        )
+        val pingFrame = WireFrame(
+            WireMessageType.PING_TELEMETRY,
+            99L,
+            wireJson.encodeToString(ping01).toByteArray(Charsets.UTF_8)
+        )
+        val decodedPing = wireJson.decodeFromString<PingTelemetryPayload>(
+            WireFrame.decode(FrameEncoder.encode(pingFrame)).payload.decodeToString()
+        )
+        assertEquals("feed1234", decodedPing.pingNonce)
+        assertTrue(decodedPing.isPong)
+
+        val diag = com.linkme.androidbridge.service.RadioDiagnosticsUiState(
+            bleRadioState = "PoweredOn",
+            bleLinkState = "GATT Connected + CCCD Ready",
+            wifiMtlsState = "Listening :49152",
+            lastWireEvents = listOf("[10:00:00.000] CCCD_ENABLED", "[10:00:00.010] TX_BYTES(42)")
+        )
+        val report = diag.formatCopyableReport("MacBook Air", 18)
+        assertTrue(report.contains("GATT Connected + CCCD Ready") && report.contains("CCCD_ENABLED"))
     }
 }

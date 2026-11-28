@@ -60,6 +60,8 @@ import java.io.File
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -103,6 +105,7 @@ class BridgeForegroundService : Service() {
     private val fileSendBusy = AtomicBoolean(false)
     private val pendingScreenPacket = AtomicReference<ScreenFramePacket?>(null)
     private val screenSendBusy = AtomicBoolean(false)
+    private val pendingPingStartByNonce = ConcurrentHashMap<String, Long>()
     @Volatile private var mirrorFpsWindowStartMs: Long = 0L
     @Volatile private var mirrorFrameCounter: Int = 0
 
@@ -164,6 +167,7 @@ class BridgeForegroundService : Service() {
         BridgeActivityHub.onPeerTrustedUpdated = null
         BridgeActivityHub.onRequestRemoteScreenMirror = null
         BridgeActivityHub.onSendScreenFrameBytes = null
+        BridgeActivityHub.onSendPing01 = null
         onManualClipboardSyncRequested = null
 
         runCatching { stopWifiTransport() }
@@ -354,15 +358,95 @@ class BridgeForegroundService : Service() {
                 },
                 onLatencyMeasured = { rttMs ->
                     BridgeActivityHub.updateConnectionState(latency = rttMs)
+                },
+                onDiagnosticEvent = { event ->
+                    BridgeActivityHub.appendWireEvent(event)
                 }
             )
             bleGattClient = gattClient
+            serviceScope.launch {
+                gattClient.diagnostics.collect { diag ->
+                    BridgeActivityHub.updateRadioDiagnostics(
+                        bleRadioState = diag.bleRadioState,
+                        bleLinkState = diag.bleLinkState
+                    )
+                }
+            }
+
+            val nsd = NsdDiscoveryManager(this)
+            nsdDiscoveryManager = nsd
+
+            val startNsdLanDiscovery: () -> Unit = {
+                nsd.startDiscovery(localIdentity.deviceId) { host, port ->
+                    BridgeActivityHub.appendWireEvent("NSD_FOUND($host:$port)")
+                    BridgeActivityHub.updateRadioDiagnostics(wifiMtlsState = "LAN Discovered $host:$port")
+                    val peerId = store.allPeers().firstOrNull()?.deviceId ?: return@startDiscovery
+                    if (wifiTlsClient == null) {
+                        serviceScope.launch {
+                            runCatching {
+                                val client = WifiTlsClient(idMgr, store, peerId) { inbound ->
+                                    serviceScope.launch { runCatching { routeInboundFrame(inbound) } }
+                                }
+                                client.connect(host, port)
+                                wifiTlsClient = client
+                                BridgeActivityHub.updateConnectionState(wifiActive = true)
+                                BridgeActivityHub.updateRadioDiagnostics(wifiMtlsState = "Connected to $host:$port")
+                                BridgeActivityHub.appendWireEvent("Wi-Fi mTLS Connected $host:$port")
+                                transport.markWifiUpgradeReady()
+                            }.onFailure { err ->
+                                BridgeActivityHub.updateRadioDiagnostics(
+                                    wifiMtlsState = "Unreachable (${err.message ?: "NSD connect failed"})"
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             if (pairedPeer != null) {
                 BridgeActivityHub.updatePeerTelemetry(name = pairedPeer.deviceName)
                 gattClient.startScanning(autoReconnect = true)
+                startNsdLanDiscovery()
             }
 
-            nsdDiscoveryManager = NsdDiscoveryManager(this)
+            BridgeActivityHub.onSendPing01 = {
+                serviceScope.launch {
+                    val nonce = UUID.randomUUID().toString().take(8)
+                    val startMs = System.currentTimeMillis()
+                    pendingPingStartByNonce[nonce] = startMs
+                    BridgeActivityHub.updateRadioDiagnostics(pingStatusText = "Sending Ping (0x01)...")
+                    val snap = telemetry.readCurrentBattery(this@BridgeForegroundService)
+                    val ping = PingTelemetryPayload(
+                        deviceId = localIdentity.deviceId,
+                        batteryLevel = snap.level ?: 100,
+                        isCharging = snap.isCharging,
+                        batterySaverActive = snap.batterySaverActive,
+                        transportState = transport.bridgeState,
+                        timestampMs = startMs,
+                        pingNonce = nonce,
+                        isPong = false
+                    )
+                    runCatching {
+                        val frame = transport.makeFrame(
+                            WireMessageType.PING_TELEMETRY,
+                            json.encodeToString(ping).toByteArray(Charsets.UTF_8)
+                        )
+                        transport.sendResilientFrame(frame, preferBle = true)
+                        BridgeActivityHub.appendWireEvent("TX 0x01 PING_TELEMETRY (nonce=$nonce)")
+                        kotlinx.coroutines.delay(4000L)
+                        if (pendingPingStartByNonce.remove(nonce) != null) {
+                            BridgeActivityHub.updateRadioDiagnostics(pingStatusText = "Timeout (no 0x01 Pong in 4s)")
+                            BridgeActivityHub.appendWireEvent("TIMEOUT 0x01 PING (nonce=$nonce)")
+                        }
+                    }.onFailure { err ->
+                        pendingPingStartByNonce.remove(nonce)
+                        BridgeActivityHub.updateRadioDiagnostics(
+                            pingStatusText = "Ping failed: ${err.message ?: "Not linked"}"
+                        )
+                        BridgeActivityHub.appendWireEvent("ERR 0x01 PING: ${err.message}")
+                    }
+                }
+            }
 
             BridgeActivityHub.onSendPairHello = { hello, lanHost, tcpPort ->
                 serviceScope.launch {
@@ -451,6 +535,7 @@ class BridgeForegroundService : Service() {
             BridgeActivityHub.onPeerTrustedUpdated = {
                 serviceScope.launch {
                     gattClient.startScanning(autoReconnect = true)
+                    startNsdLanDiscovery()
                     emitImmediateTelemetry()
                 }
             }
@@ -622,6 +707,8 @@ class BridgeForegroundService : Service() {
             nsdDiscoveryManager?.registerService(localId, port)
         }
         BridgeActivityHub.updateConnectionState(wifiActive = true)
+        BridgeActivityHub.updateRadioDiagnostics(wifiMtlsState = "Listening :$port")
+        BridgeActivityHub.appendWireEvent("Wi-Fi mTLS Listening :$port")
         return port
     }
 
@@ -632,9 +719,12 @@ class BridgeForegroundService : Service() {
         wifiTlsServer = null
         runCatching { nsdDiscoveryManager?.unregister() }
         BridgeActivityHub.updateConnectionState(wifiActive = false)
+        BridgeActivityHub.updateRadioDiagnostics(wifiMtlsState = "Standby")
     }
 
     private fun routeInboundFrame(frame: WireFrame) {
+        val opcode = frame.messageType.code.toInt() and 0xFF
+        BridgeActivityHub.appendWireEvent("RX 0x%02X %s (%dB)".format(opcode, frame.messageType.name, frame.payload.size))
         val clipSync = clipboardSyncManager
         val transferMgr = fileTransferManager
         val transport = transportManager
@@ -657,9 +747,13 @@ class BridgeForegroundService : Service() {
                                 client.connect(hostHint, wake.servicePort)
                                 wifiTlsClient = client
                                 BridgeActivityHub.updateConnectionState(wifiActive = true)
-                            }.onFailure {
+                                BridgeActivityHub.updateRadioDiagnostics(wifiMtlsState = "Connected to $hostHint:${wake.servicePort}")
+                                BridgeActivityHub.appendWireEvent("Wi-Fi mTLS Connected $hostHint:${wake.servicePort}")
+                            }.onFailure { err ->
                                 wifiTlsClient = null
                                 BridgeActivityHub.updateConnectionState(wifiActive = false)
+                                BridgeActivityHub.updateRadioDiagnostics(wifiMtlsState = "Unreachable (${err.message ?: "connect failed"})")
+                                BridgeActivityHub.appendWireEvent("Wi-Fi mTLS Failed: ${err.message}")
                             }
                         } else if (localPort > 0) {
                             BridgeActivityHub.updateConnectionState(wifiActive = true)
@@ -764,6 +858,41 @@ class BridgeForegroundService : Service() {
                             percent = ping.batteryLevel,
                             charging = ping.isCharging
                         )
+                        val nonce = ping.pingNonce
+                        if (nonce != null) {
+                            if (ping.isPong) {
+                                val start = pendingPingStartByNonce.remove(nonce)
+                                if (start != null) {
+                                    val rtt = (System.currentTimeMillis() - start).toInt().coerceAtLeast(1)
+                                    BridgeActivityHub.updateConnectionState(latency = rtt)
+                                    BridgeActivityHub.updateRadioDiagnostics(pingStatusText = "RTT: $rtt ms (0x01 Pong)")
+                                    BridgeActivityHub.appendWireEvent("RX 0x01 PONG RTT=${rtt}ms (nonce=$nonce)")
+                                }
+                            } else if (telemetry != null && transport != null && identityManager != null) {
+                                serviceScope.launch {
+                                    runCatching {
+                                        val snap = telemetry.readCurrentBattery(this@BridgeForegroundService)
+                                        val localId = identityManager?.loadOrCreateIdentity()?.deviceId ?: "android"
+                                        val pong = PingTelemetryPayload(
+                                            deviceId = localId,
+                                            batteryLevel = snap.level ?: 100,
+                                            isCharging = snap.isCharging,
+                                            batterySaverActive = snap.batterySaverActive,
+                                            transportState = transport.bridgeState,
+                                            timestampMs = System.currentTimeMillis(),
+                                            pingNonce = nonce,
+                                            isPong = true
+                                        )
+                                        val reply = transport.makeFrame(
+                                            WireMessageType.PING_TELEMETRY,
+                                            json.encodeToString(pong).toByteArray(Charsets.UTF_8)
+                                        )
+                                        transport.sendResilientFrame(reply, preferBle = true)
+                                        BridgeActivityHub.appendWireEvent("TX 0x01 PONG (nonce=$nonce)")
+                                    }
+                                }
+                            }
+                        }
                     }
             }
 

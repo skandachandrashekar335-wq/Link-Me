@@ -789,5 +789,27 @@ struct TransportAndLoopbackTests {
         let pinInput = RemoteInputPayload.text("1234")
         let decodedPin = try JSONDecoder().decode(RemoteInputPayload.self, from: JSONEncoder().encode(pinInput))
         #expect(decodedPin == pinInput)
+
+        // 6. v2.0.1 0x01 Ping/Pong round-trip & backward-compatible decode + BlePeripheralDiagnostics
+        let legacyPingJson = Data("{\"msgType\":\"PING_TELEMETRY\",\"deviceId\":\"d1\",\"batteryLevel\":88,\"isCharging\":false,\"batterySaverActive\":false,\"transportState\":\"DORMANT_BLE\",\"timestampMs\":1770000100}".utf8)
+        let legacyPing = try JSONDecoder().decode(PingTelemetryPayload.self, from: legacyPingJson)
+        #expect(legacyPing.pingNonce == nil && legacyPing.isPong == false && legacyPing.batteryLevel == 88)
+
+        let ping01 = PingTelemetryPayload(
+            deviceId: macId.deviceId,
+            batteryLevel: 95,
+            isCharging: true,
+            batterySaverActive: false,
+            transportState: .dormantBle,
+            timestampMs: 1_770_000_200,
+            pingNonce: "ab12cd34",
+            isPong: true
+        )
+        let pingFrame = try WireFrame(messageType: .pingTelemetry, sequenceId: 77, payload: try JSONEncoder().encode(ping01))
+        let pingDecoded = try JSONDecoder().decode(PingTelemetryPayload.self, from: try WireFrame.decode(from: FrameEncoder.encode(pingFrame)).payload)
+        #expect(pingDecoded.pingNonce == "ab12cd34" && pingDecoded.isPong == true)
+
+        let diag = BlePeripheralDiagnostics(isPoweredOn: true, isAdvertising: true, radioStateLabel: "PoweredOn", linkStateLabel: "Advertising", eventLog: ["[10:00:00.000] advertisingStarted"])
+        #expect(diag.radioStateLabel == "PoweredOn" && diag.eventLog.count == 1)
     }
 }

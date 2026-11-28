@@ -196,9 +196,19 @@ final class BridgeDashboardViewModel: ObservableObject {
 
     // Diagnostics & real hardware state
     @Published var peripheralDiagnostics = BlePeripheralDiagnostics()
+    @Published var wifiMtlsStatus: String = "Standby"
+    @Published var wireEventLog: [String] = []
+    @Published var pingTestStatus: String?
     @Published var localCertFingerprint: String = ""
     @Published var localListeningPort: UInt16 = 49152
     @Published var loopbackDiagnosticsResult: String?
+
+    private var pendingPingStartByNonce: [String: Date] = [:]
+    private static let diagTimeFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateFormat = "HH:mm:ss.SSS"
+        return df
+    }()
 
     let preferences = BridgePreferences()
     let transportManager = TransportManager()
@@ -327,6 +337,9 @@ final class BridgeDashboardViewModel: ObservableObject {
                 guard let self else { return }
                 let hadSubscribers = self.peripheralDiagnostics.subscribedCentralsCount > 0
                 self.peripheralDiagnostics = diag
+                if let latest = diag.eventLog.first {
+                    self.recordWireEvent(latest)
+                }
                 self.isBluetoothConnected = (diag.subscribedCentralsCount > 0) || (self.bleCentralManager?.isConnected == true)
                 await self.clipboardManager.setPeerReachable(self.isBluetoothConnected || self.peerPaired)
                 if !hadSubscribers && diag.subscribedCentralsCount > 0 && self.peerPaired {
@@ -418,6 +431,92 @@ final class BridgeDashboardViewModel: ObservableObject {
         activityLog.insert(record, at: 0)
         if activityLog.count > 80 {
             activityLog.removeLast(activityLog.count - 80)
+        }
+    }
+
+    func recordWireEvent(_ text: String) {
+        let entry: String
+        if text.hasPrefix("[") {
+            entry = text
+        } else {
+            entry = "[\(Self.diagTimeFormatter.string(from: Date()))] \(text)"
+        }
+        if wireEventLog.first == entry { return }
+        wireEventLog.insert(entry, at: 0)
+        if wireEventLog.count > 40 {
+            wireEventLog.removeLast(wireEventLog.count - 40)
+        }
+    }
+
+    var bleLinkSummary: String {
+        if peripheralDiagnostics.subscribedCentralsCount > 0 || bleCentralManager?.isConnected == true {
+            return "GATT Connected + CCCD Ready"
+        }
+        return peripheralDiagnostics.linkStateLabel
+    }
+
+    var combinedDiagnosticsEvents: [String] {
+        var seen = Set<String>()
+        var merged: [String] = []
+        for item in wireEventLog + peripheralDiagnostics.eventLog {
+            if seen.insert(item).inserted {
+                merged.append(item)
+            }
+        }
+        return Array(merged.prefix(10))
+    }
+
+    func copyDiagnosticsToClipboard() {
+        let events = combinedDiagnosticsEvents.isEmpty
+            ? "(none)"
+            : combinedDiagnosticsEvents.joined(separator: "\n")
+        let report = """
+        Link-Me Connection Diagnostics (macOS)
+        BLE Radio State: \(peripheralDiagnostics.radioStateLabel)
+        BLE Link: \(bleLinkSummary)
+        Wi-Fi mTLS: \(wifiMtlsStatus) (Pairing TCP :\(localListeningPort))
+        Peer: \(peerName) • Paired=\(peerPaired) • Latency=\(latencyMs.map { "\($0)ms" } ?? "--")
+        Last Wire Events:
+        \(events)
+        """
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(report, forType: .string)
+        statusBanner = "Copied diagnostics log to clipboard"
+    }
+
+    func sendPing01() {
+        let nonce = String(UUID().uuidString.prefix(8)).lowercased()
+        let start = Date()
+        pendingPingStartByNonce[nonce] = start
+        pingTestStatus = "Sending Ping (0x01)..."
+        let battery = MacBatteryMonitor.readBattery()
+        let payload = PingTelemetryPayload(
+            deviceId: localDeviceId,
+            batteryLevel: battery.level ?? 100,
+            isCharging: battery.isCharging,
+            batterySaverActive: false,
+            transportState: bridgeState,
+            timestampMs: UInt64(start.timeIntervalSince1970 * 1000),
+            pingNonce: nonce,
+            isPong: false
+        )
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let data = try JSONEncoder().encode(payload)
+                let frame = try await self.transportManager.makeFrame(messageType: .pingTelemetry, payload: data)
+                try await self.transportManager.sendResilientFrame(frame, preferBle: true)
+                self.recordWireEvent("TX 0x01 PING_TELEMETRY (\(data.count)B, nonce=\(nonce))")
+                try? await Task.sleep(for: .seconds(4))
+                if self.pendingPingStartByNonce.removeValue(forKey: nonce) != nil {
+                    self.pingTestStatus = "No 0x01 Pong in 4s"
+                    self.recordWireEvent("TIMEOUT 0x01 PING (nonce=\(nonce))")
+                }
+            } catch {
+                self.pendingPingStartByNonce.removeValue(forKey: nonce)
+                self.pingTestStatus = "Ping error: \(error.localizedDescription)"
+                self.recordWireEvent("ERR 0x01 PING: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -663,16 +762,25 @@ final class BridgeDashboardViewModel: ObservableObject {
         server.onFrameReceived = { [weak self] frame in
             Task { await self?.handleInboundFrame(frame) }
         }
+        server.onStatusChanged = { [weak self] status in
+            Task { @MainActor [weak self] in
+                self?.wifiMtlsStatus = status
+                self?.recordWireEvent("Wi-Fi mTLS: \(status)")
+            }
+        }
         wifiTlsServer = server
+        let port = try await server.start(port: 0, advertiseBonjour: true)
+        wifiMtlsStatus = "Listening :\(port)"
+        recordWireEvent("Wi-Fi mTLS Listening :\(port)")
         appendActivity(
             BridgeActivityRecord(
                 category: .system,
                 title: "Wi-Fi mTLS 1.3 Active",
-                detail: "Cooldown \(preferences.wifiCooldownSeconds)s",
+                detail: "Listening :\(port) • Cooldown \(preferences.wifiCooldownSeconds)s",
                 badgeText: "TLS 1.3"
             )
         )
-        return try await server.start(port: 0, advertiseBonjour: true)
+        return port
     }
 
     private func sendOverWifi(_ frame: WireFrame) async throws {
@@ -698,6 +806,7 @@ final class BridgeDashboardViewModel: ObservableObject {
         wifiTlsClient = nil
         wifiTlsServer?.stop()
         wifiTlsServer = nil
+        wifiMtlsStatus = "Standby (Pairing :\(localListeningPort))"
         bridgeState = .dormantBle
         appendActivity(
             BridgeActivityRecord(
@@ -725,6 +834,8 @@ final class BridgeDashboardViewModel: ObservableObject {
     }
 
     private func handleInboundFrame(_ frame: WireFrame) async {
+        let hexOpcode = String(format: "0x%02X", frame.messageType.rawValue)
+        recordWireEvent("RX \(hexOpcode) (\(frame.payload.count)B)")
         switch frame.messageType {
         case .pairHello:
             if let hello = try? JSONDecoder().decode(PairHelloPayload.self, from: frame.payload) {
@@ -762,9 +873,15 @@ final class BridgeDashboardViewModel: ObservableObject {
                 client.onFrameReceived = { [weak self] inbound in
                     Task { await self?.handleInboundFrame(inbound) }
                 }
-                if (try? await client.connect(host: hostHint, port: wake.servicePort)) != nil {
+                do {
+                    try await client.connect(host: hostHint, port: wake.servicePort)
                     wifiTlsClient = client
                     bridgeState = .activeWifiStream
+                    wifiMtlsStatus = "Connected to \(hostHint):\(wake.servicePort)"
+                    recordWireEvent("Wi-Fi mTLS Connected \(hostHint):\(wake.servicePort)")
+                } catch {
+                    wifiMtlsStatus = "Unreachable (\(error.localizedDescription))"
+                    recordWireEvent("Wi-Fi mTLS Failed: \(error.localizedDescription)")
                 }
             }
 
@@ -849,6 +966,33 @@ final class BridgeDashboardViewModel: ObservableObject {
                 peerBatteryPercent = telemetry.batteryLevel
                 peerIsCharging = telemetry.isCharging
                 bridgeState = telemetry.transportState
+                if let nonce = telemetry.pingNonce {
+                    if telemetry.isPong {
+                        if let start = pendingPingStartByNonce.removeValue(forKey: nonce) {
+                            let rtt = max(1, Int(Date().timeIntervalSince(start) * 1000))
+                            latencyMs = rtt
+                            pingTestStatus = "RTT: \(rtt) ms (0x01 Pong)"
+                            recordWireEvent("PONG 0x01 RTT=\(rtt)ms (nonce=\(nonce))")
+                        }
+                    } else {
+                        let battery = MacBatteryMonitor.readBattery()
+                        let pong = PingTelemetryPayload(
+                            deviceId: localDeviceId,
+                            batteryLevel: battery.level ?? 100,
+                            isCharging: battery.isCharging,
+                            batterySaverActive: false,
+                            transportState: bridgeState,
+                            timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                            pingNonce: nonce,
+                            isPong: true
+                        )
+                        if let data = try? JSONEncoder().encode(pong),
+                           let reply = try? await transportManager.makeFrame(messageType: .pingTelemetry, payload: data) {
+                            try? await transportManager.sendResilientFrame(reply, preferBle: true)
+                            recordWireEvent("TX 0x01 PONG (nonce=\(nonce))")
+                        }
+                    }
+                }
             }
 
         case .deviceCommand:

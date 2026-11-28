@@ -42,7 +42,9 @@ data class PingTelemetryPayload(
     val isCharging: Boolean,
     val batterySaverActive: Boolean,
     val transportState: BridgeState,
-    val timestampMs: Long
+    val timestampMs: Long,
+    val pingNonce: String? = null,
+    val isPong: Boolean = false
 )
 
 @Serializable

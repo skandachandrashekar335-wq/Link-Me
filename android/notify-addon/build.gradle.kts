@@ -12,8 +12,8 @@ android {
         applicationId = "com.linkme.androidbridge.notifyaddon"
         minSdk = 29
         targetSdk = 35
-        versionCode = 10
-        versionName = "2.0.0"
+        versionCode = 11
+        versionName = "2.0.1"
     }
 
     buildTypes {

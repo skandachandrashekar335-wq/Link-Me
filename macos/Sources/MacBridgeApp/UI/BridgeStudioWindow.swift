@@ -368,6 +368,8 @@ struct BridgeStudioWindow: View {
             }
         }
 
+        liveRadioDiagnosticsDrawer(compact: true)
+
         // Pending Incoming Offer Banner
         if let pending = viewModel.pendingIncomingOffer {
             HStack {
@@ -1129,7 +1131,104 @@ struct BridgeStudioWindow: View {
         }
     }
 
-    // MARK: - Diagnostics Workspace (Phase 1 Requirement)
+    // MARK: - Diagnostics Workspace & Live Radio Drawer
+
+    @ViewBuilder
+    private func liveRadioDiagnosticsDrawer(compact: Bool) -> some View {
+        let events = viewModel.combinedDiagnosticsEvents
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("LIVE RADIO DIAGNOSTICS")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(pal.secondaryText)
+                    Text("Connection Diagnostics")
+                        .font(.system(size: compact ? 14 : 17, weight: .bold))
+                        .foregroundStyle(pal.onSurface)
+                }
+                Spacer()
+                if let pingStatus = viewModel.pingTestStatus {
+                    Text(pingStatus)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(pal.secondaryAccent.opacity(0.16)))
+                        .foregroundStyle(pal.secondaryAccent)
+                }
+                Button {
+                    viewModel.sendPing01()
+                } label: {
+                    Label("Send Ping (0x01)", systemImage: "waveform.path.ecg")
+                        .font(.system(size: 11, weight: .semibold))
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(pal.primaryAccent))
+                        .foregroundStyle(Color.white)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    viewModel.copyDiagnosticsToClipboard()
+                } label: {
+                    Label("Copy Log", systemImage: "doc.on.doc")
+                        .font(.system(size: 11, weight: .medium))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(pal.surfaceHigh))
+                        .foregroundStyle(pal.onSurface)
+                }
+                .buttonStyle(.plain)
+            }
+
+            HStack(spacing: 10) {
+                diagMiniTile("BLE Radio State", viewModel.peripheralDiagnostics.radioStateLabel)
+                diagMiniTile("BLE Link", viewModel.bleLinkSummary)
+                diagMiniTile("Wi-Fi mTLS", "\(viewModel.wifiMtlsStatus) (:\(viewModel.localListeningPort))")
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("LAST 10 WIRE EVENTS")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(pal.secondaryText)
+                if events.isEmpty {
+                    Text("Waiting for BLE GATT or Wi-Fi mTLS wire activity...")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(pal.secondaryText)
+                } else {
+                    ForEach(Array(events.enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(pal.onSurface)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(pal.surfaceLowest.opacity(0.8)))
+        }
+        .padding(14)
+        .liquidGlassCard(pal, cornerRadius: 16)
+    }
+
+    private func diagMiniTile(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title.uppercased())
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(pal.secondaryText)
+            Text(value)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(pal.onSurface)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .textSelection(.enabled)
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(pal.surfaceLow))
+    }
 
     private var diagnosticsWorkspace: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -1154,6 +1253,8 @@ struct BridgeStudioWindow: View {
                 }
                 .buttonStyle(.plain)
             }
+
+            liveRadioDiagnosticsDrawer(compact: false)
 
             VStack(alignment: .leading, spacing: 10) {
                 diagRow("BLE Power & Advertising", viewModel.peripheralDiagnostics.isAdvertising ? "Powered On • Advertising 414D0001" : viewModel.peripheralDiagnostics.lastStatusMessage)

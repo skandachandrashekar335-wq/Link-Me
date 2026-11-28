@@ -9,6 +9,9 @@ import com.linkme.androidbridge.core.protocol.PairHelloPayload
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
 
@@ -74,6 +77,27 @@ data class ScreenMirrorUiState(
     val statusText: String = "Idle"
 )
 
+data class RadioDiagnosticsUiState(
+    val bleRadioState: String = "Unknown",
+    val bleLinkState: String = "Idle",
+    val wifiMtlsState: String = "Standby",
+    val lastWireEvents: List<String> = emptyList(),
+    val pingStatusText: String? = null
+) {
+    fun formatCopyableReport(peerName: String, latencyMs: Int?): String {
+        val events = if (lastWireEvents.isEmpty()) "(none)" else lastWireEvents.take(10).joinToString("\n")
+        return buildString {
+            appendLine("Link-Me Connection Diagnostics (Android)")
+            appendLine("Peer: $peerName • Latency: ${latencyMs?.let { "${it}ms" } ?: "--"}")
+            appendLine("BLE Radio State: $bleRadioState")
+            appendLine("BLE Link: $bleLinkState")
+            appendLine("Wi-Fi mTLS: $wifiMtlsState")
+            appendLine("Last 10 Wire Events:")
+            append(events)
+        }
+    }
+}
+
 /**
  * Shared reactive bridge runtime hub connecting BridgeForegroundService, ScreenMirrorService, and Compose UI.
  */
@@ -119,6 +143,14 @@ object BridgeActivityHub {
 
     private val _pairingStatus = MutableStateFlow<PairingCommitStatus>(PairingCommitStatus.Idle)
     val pairingStatus: StateFlow<PairingCommitStatus> = _pairingStatus.asStateFlow()
+
+    private val _radioDiagnostics = MutableStateFlow(RadioDiagnosticsUiState())
+    val radioDiagnostics: StateFlow<RadioDiagnosticsUiState> = _radioDiagnostics.asStateFlow()
+
+    private val wireLogLock = Any()
+
+    @Volatile
+    var onSendPing01: (() -> Unit)? = null
 
     @Volatile
     var pendingPairingCandidate: PendingPairingCandidate? = null
@@ -249,5 +281,43 @@ object BridgeActivityHub {
     fun resetPairingStatus() {
         pendingPairingCandidate = null
         _pairingStatus.value = PairingCommitStatus.Idle
+    }
+
+    fun updateRadioDiagnostics(
+        bleRadioState: String? = null,
+        bleLinkState: String? = null,
+        wifiMtlsState: String? = null,
+        pingStatusText: String? = null,
+        clearPingStatus: Boolean = false
+    ) {
+        synchronized(wireLogLock) {
+            val cur = _radioDiagnostics.value
+            _radioDiagnostics.value = cur.copy(
+                bleRadioState = bleRadioState ?: cur.bleRadioState,
+                bleLinkState = bleLinkState ?: cur.bleLinkState,
+                wifiMtlsState = wifiMtlsState ?: cur.wifiMtlsState,
+                pingStatusText = when {
+                    clearPingStatus -> null
+                    pingStatusText != null -> pingStatusText
+                    else -> cur.pingStatusText
+                }
+            )
+        }
+    }
+
+    fun appendWireEvent(line: String) {
+        val entry = if (line.startsWith("[")) {
+            line
+        } else {
+            val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
+            "[$ts] $line"
+        }
+        synchronized(wireLogLock) {
+            val cur = _radioDiagnostics.value
+            if (cur.lastWireEvents.firstOrNull() == entry) return
+            _radioDiagnostics.value = cur.copy(
+                lastWireEvents = (listOf(entry) + cur.lastWireEvents).take(40)
+            )
+        }
     }
 }

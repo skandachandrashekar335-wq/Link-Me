@@ -88,6 +88,7 @@ import com.linkme.androidbridge.service.ActivityCategory
 import com.linkme.androidbridge.service.BridgeActivityItem
 import com.linkme.androidbridge.service.FileTransferUiState
 import com.linkme.androidbridge.service.NotificationAddonStatus
+import com.linkme.androidbridge.service.RadioDiagnosticsUiState
 import com.linkme.androidbridge.service.ScreenMirrorUiState
 import com.linkme.androidbridge.ui.theme.BridgeThemePalette
 import com.linkme.androidbridge.ui.theme.LocalBridgePalette
@@ -122,8 +123,11 @@ fun BridgeHomeScreen(
     activeFileTransfer: FileTransferUiState?,
     pendingFileOffer: FileOfferPayload?,
     mirrorState: ScreenMirrorUiState,
+    radioDiagnostics: RadioDiagnosticsUiState,
     notifications: List<NotificationEventPayload>,
     activities: List<BridgeActivityItem>,
+    onSendPing01: () -> Unit,
+    onCopyDiagnostics: (String) -> Unit,
     onToggleClipboardSync: (Boolean) -> Unit,
     onToggleNotificationMirror: (Boolean) -> Unit,
     onConfirmTrustedPeer: (String, String, String, ByteArray, ByteArray, () -> Unit) -> Unit,
@@ -342,7 +346,12 @@ fun BridgeHomeScreen(
                             latencyMs = latencyMs,
                             activeFileTransfer = activeFileTransfer,
                             pendingFileOffer = pendingFileOffer,
+                            radioDiagnostics = radioDiagnostics,
                             notifications = notifications,
+                            onSendPing01 = onSendPing01,
+                            onCopyDiagnostics = {
+                                onCopyDiagnostics(radioDiagnostics.formatCopyableReport(peerName, latencyMs))
+                            },
                             onOpenQrTab = { currentTab = AndroidStudioTab.SCAN_QR },
                             onSendFileClick = onSendFileClick,
                             onSendUrlClick = onSendUrlClick,
@@ -432,7 +441,10 @@ private fun HomeTabContent(
     latencyMs: Int?,
     activeFileTransfer: FileTransferUiState?,
     pendingFileOffer: FileOfferPayload?,
+    radioDiagnostics: RadioDiagnosticsUiState,
     notifications: List<NotificationEventPayload>,
+    onSendPing01: () -> Unit,
+    onCopyDiagnostics: () -> Unit,
     onOpenQrTab: () -> Unit,
     onSendFileClick: () -> Unit,
     onSendUrlClick: () -> Unit,
@@ -562,7 +574,124 @@ private fun HomeTabContent(
         }
     }
 
-    // 2. Quick Actions Strip (matches android_home)
+    // 2. Live Radio Connection Diagnostics Card (Visible & Copyable + Ping 0x01)
+    var diagExpanded by remember { mutableStateOf(true) }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = pal.surfaceContainer),
+        border = BorderStroke(1.dp, pal.outlineVariant)
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { diagExpanded = !diagExpanded },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "LIVE RADIO DIAGNOSTICS",
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        color = pal.secondaryAccent
+                    )
+                    Text(
+                        "Connection Diagnostics",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = pal.onSurface
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(
+                        onClick = onCopyDiagnostics,
+                        shape = CircleShape
+                    ) {
+                        Text("Copy", fontSize = 11.sp, color = pal.onSurface)
+                    }
+                    Button(
+                        onClick = onSendPing01,
+                        shape = CircleShape,
+                        colors = ButtonDefaults.buttonColors(containerColor = pal.primaryAccent)
+                    ) {
+                        Text("Send Ping (0x01)", fontSize = 11.sp, color = Color.White)
+                    }
+                }
+            }
+
+            if (radioDiagnostics.pingStatusText != null) {
+                Text(
+                    text = radioDiagnostics.pingStatusText,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                    color = pal.secondaryAccent
+                )
+            }
+
+            if (diagExpanded) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(pal.surfaceLowest)
+                        .padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        "BLE Radio: ${radioDiagnostics.bleRadioState}",
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = pal.onSurface
+                    )
+                    Text(
+                        "BLE Link: ${radioDiagnostics.bleLinkState}",
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = pal.onSurface
+                    )
+                    Text(
+                        "Wi-Fi mTLS: ${radioDiagnostics.wifiMtlsState}",
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = pal.onSurface
+                    )
+                    HorizontalDivider(thickness = 1.dp, color = pal.outlineVariant, modifier = Modifier.padding(vertical = 4.dp))
+                    Text(
+                        "LAST 10 WIRE EVENTS",
+                        fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        color = pal.secondaryText
+                    )
+                    if (radioDiagnostics.lastWireEvents.isEmpty()) {
+                        Text(
+                            "Waiting for BLE GATT or Wi-Fi mTLS events...",
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = pal.secondaryText
+                        )
+                    } else {
+                        radioDiagnostics.lastWireEvents.take(10).forEach { line ->
+                            Text(
+                                text = line,
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = pal.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Quick Actions Strip (matches android_home)
     Text("Quick Actions", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = pal.onSurface)
     Row(
         modifier = Modifier.fillMaxWidth(),

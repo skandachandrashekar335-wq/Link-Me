@@ -25,6 +25,7 @@ public final class WifiTlsServer: @unchecked Sendable {
 
     public var onFrameReceived: (@Sendable (WireFrame) -> Void)?
     public var onClientConnected: (@Sendable () -> Void)?
+    public var onStatusChanged: (@Sendable (String) -> Void)?
 
     public var hasActiveClients: Bool {
         stateLock.lock()
@@ -80,12 +81,16 @@ public final class WifiTlsServer: @unchecked Sendable {
                 switch state {
                 case .ready:
                     box.resumed = true
-                    continuation.resume(returning: newListener.port?.rawValue ?? 0)
+                    let readyPort = newListener.port?.rawValue ?? 0
+                    self.onStatusChanged?("Listening :\(readyPort)")
+                    continuation.resume(returning: readyPort)
                 case .failed(let err):
                     box.resumed = true
+                    self.onStatusChanged?("Unreachable (\(err.localizedDescription))")
                     continuation.resume(throwing: WifiTlsError.handshakeOrPinningFailed(err.localizedDescription))
                 case .cancelled:
                     box.resumed = true
+                    self.onStatusChanged?("Standby")
                     continuation.resume(throwing: WifiTlsError.connectionClosed)
                 default:
                     break
@@ -224,8 +229,15 @@ public final class WifiTlsServer: @unchecked Sendable {
                     box.finish(true)
                 }
                 self.onClientConnected?()
+                self.onStatusChanged?("Connected to \(connection.endpoint)")
                 self.receiveLoop(on: connection, processor: processor)
-            case .failed, .cancelled:
+            case .failed(let err):
+                self.stateLock.lock()
+                self.readyConnections.removeValue(forKey: key)
+                self.stateLock.unlock()
+                self.activeConnections.removeValue(forKey: key)
+                self.onStatusChanged?("Unreachable (\(err.localizedDescription))")
+            case .cancelled:
                 self.stateLock.lock()
                 self.readyConnections.removeValue(forKey: key)
                 self.stateLock.unlock()

@@ -104,6 +104,7 @@ class MainActivity : ComponentActivity() {
                 val peerIsCharging by BridgeActivityHub.peerIsCharging.collectAsState()
                 val mirrorState by BridgeActivityHub.mirrorState.collectAsState()
                 val pairingStatus by BridgeActivityHub.pairingStatus.collectAsState()
+                val radioDiagnostics by BridgeActivityHub.radioDiagnostics.collectAsState()
 
                 LaunchedEffect(pairingStatus) {
                     val st = pairingStatus
@@ -191,8 +192,14 @@ class MainActivity : ComponentActivity() {
                     activeFileTransfer = activeFileTransfer,
                     pendingFileOffer = pendingOffer,
                     mirrorState = mirrorState,
+                    radioDiagnostics = radioDiagnostics,
                     notifications = liveNotifications,
                     activities = activities,
+                    onSendPing01 = { BridgeActivityHub.onSendPing01?.invoke() },
+                    onCopyDiagnostics = { report ->
+                        val cm = getSystemService(ClipboardManager::class.java)
+                        cm?.setPrimaryClip(ClipData.newPlainText("Link-Me Diagnostics", report))
+                    },
                     onToggleClipboardSync = { clipboardSyncEnabled = it },
                     onToggleNotificationMirror = { notificationMirrorEnabled = it },
                     onConfirmTrustedPeer = { peerId, peerName, certSha256, bleSecret, btSessionKey, onPersisted ->
@@ -361,9 +368,10 @@ class MainActivity : ComponentActivity() {
                             Text(
                                 "AndroidBridge keeps Notification Listener permission out of the main APK so Play Protect installs cleanly.\n\n" +
                                     "To enable notification & remote cursor mirroring:\n" +
-                                    "1. Install AndroidBridge-NotifyAddon-v2.0.0.apk from GitHub Releases\n" +
-                                    "2. Or run: adb install -r AndroidBridge-NotifyAddon-v2.0.0.apk\n" +
-                                    "3. Grant Notification & Accessibility access to Link-Me Notify Add-on.",
+                                    "1. If an older Notify Add-on was installed, uninstall it once (v2.0.1 switches to a permanent release key).\n" +
+                                    "2. Play Protect EFP blocks browser sideloads with Accessibility/Notification permissions; install via USB ADB:\n" +
+                                    "   adb install -r AndroidBridge-NotifyAddon-v2.0.1.apk\n" +
+                                    "3. Grant Restricted Settings -> Notification & Accessibility access.",
                                 fontSize = 13.sp,
                                 fontFamily = FontFamily.Default
                             )
@@ -376,7 +384,7 @@ class MainActivity : ComponentActivity() {
                                         startActivity(
                                             Intent(
                                                 Intent.ACTION_VIEW,
-                                                Uri.parse("https://github.com/skandachandrashekar335-wq/Link-Me/releases/tag/v1.1.0")
+                                                Uri.parse("https://github.com/skandachandrashekar335-wq/Link-Me/releases/latest")
                                             )
                                         )
                                     }

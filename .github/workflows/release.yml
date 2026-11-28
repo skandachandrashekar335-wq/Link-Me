@@ -44,7 +44,8 @@ jobs:
           cp Resources/Info.plist "$APP_DIR/Contents/Info.plist"
           cp Resources/AppIcon.icns "$APP_DIR/Contents/Resources/AppIcon.icns"
           printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
-          codesign --force --deep --sign - "$APP_DIR"
+          codesign --force --deep --entitlements Resources/MacBridge.entitlements --sign - "$APP_DIR"
+          codesign -d --entitlements - "$APP_DIR" || true
 
       - name: Package DMG & Verify Non-Empty
         run: |
@@ -113,11 +114,15 @@ jobs:
           APKSIGNER="${BUILD_TOOLS_DIR}/apksigner"
           AAPT2="${BUILD_TOOLS_DIR}/aapt2"
 
-          rm -f /tmp/release.keystore
-          keytool -genkeypair -v -keystore /tmp/release.keystore \
-            -storepass linkme123 -keypass linkme123 \
-            -alias linkme -keyalg RSA -keysize 2048 -validity 3650 \
-            -dname "CN=Link-Me,O=Link-Me,C=US"
+          KEYSTORE_PATH="/tmp/linkme-release.p12"
+          KEYSTORE_TYPE="PKCS12"
+          KEYSTORE_PASS="linkme-release-v2"
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > "$KEYSTORE_PATH"
+            KEYSTORE_PASS="${{ secrets.ANDROID_KEYSTORE_PASSWORD }}"
+          else
+            cp android/keystore/linkme-release.p12 "$KEYSTORE_PATH"
+          fi
 
           sign_apk() {
             local raw_apk="$1"
@@ -127,9 +132,10 @@ jobs:
 
             "$ZIPALIGN" -p -f -v 4 "$raw_apk" "$aligned"
             "$APKSIGNER" sign \
-              --ks /tmp/release.keystore \
-              --ks-pass pass:linkme123 \
-              --key-pass pass:linkme123 \
+              --ks "$KEYSTORE_PATH" \
+              --ks-type "$KEYSTORE_TYPE" \
+              --ks-pass "pass:${KEYSTORE_PASS}" \
+              --key-pass "pass:${KEYSTORE_PASS}" \
               --v1-signing-enabled true \
               --v2-signing-enabled true \
               --v3-signing-enabled true \

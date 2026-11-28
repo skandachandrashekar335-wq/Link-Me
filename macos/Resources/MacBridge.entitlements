@@ -3,17 +3,13 @@
 <plist version="1.0">
 <dict>
     <key>com.apple.security.app-sandbox</key>
-    <true/>
+    <false/>
     <key>com.apple.security.network.client</key>
     <true/>
     <key>com.apple.security.network.server</key>
     <true/>
     <key>com.apple.security.device.bluetooth</key>
     <true/>
-    <key>keychain-access-groups</key>
-    <array>
-        <string>$(AppIdentifierPrefix)com.linkme.macbridge</string>
-    </array>
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>
 </dict>

@@ -651,8 +651,12 @@ class TransportAndLoopbackTest {
             assertArrayEquals(jpeg, decodedScreen.jpegData)
 
             val highFpsCtrl = ScreenControlPayload(action = "start", source = "android", fps = 60, quality = 65)
-            val ctrlJson = Json.encodeToString(highFpsCtrl)
+            val wireJson = Json { encodeDefaults = true }
+            val ctrlJson = wireJson.encodeToString(highFpsCtrl)
             assertTrue(ctrlJson.contains("\"fps\":60") && ctrlJson.contains("\"quality\":65"))
+            val roundTrippedCtrl = wireJson.decodeFromString<ScreenControlPayload>(ctrlJson)
+            assertEquals(60, roundTrippedCtrl.fps)
+            assertEquals(65, roundTrippedCtrl.quality)
 
             val textInputJson = RemoteControlIpcBridge.encodeRemoteInputJson(
                 RemoteInputPayload(type = "text", text = "search link-me")

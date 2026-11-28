@@ -813,8 +813,8 @@ struct TransportAndLoopbackTests {
         #expect(diag.radioStateLabel == "PoweredOn" && diag.eventLog.count == 1)
 
         // 7. v2.1.0 Inverted BLE tokenTag Service Data match + PAIR_HELLO -> PAIR_COMMIT -> PAIR_ACK dual TrustStore sync
-        let invMacTrust = TrustStore(fileURL: nil)
-        let invAndroidTrust = TrustStore(fileURL: nil)
+        let invMacTrust = TrustStore(store: InMemorySecureStore())
+        let invAndroidTrust = TrustStore(store: InMemorySecureStore())
         let invPairing = PairingFeature(identityManager: macIdMgr, trustStore: invMacTrust)
         let (invUri, _) = try await invPairing.beginPairingSession(tcpPort: 0, deviceName: "Skanda MacBook Air M5")
         let tokenTag = PairingCrypto.computeTokenTag(invUri.pairToken)

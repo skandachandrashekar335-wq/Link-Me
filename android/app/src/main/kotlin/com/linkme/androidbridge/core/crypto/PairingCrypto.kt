@@ -296,5 +296,12 @@ class PairingCrypto(
             }
             return out
         }
+
+        /** 4-byte SHA-256 discovery tag advertised in BLE Service Data so MacBook scans lock onto this Android peer. */
+        fun computeTokenTag(pairToken: String): ByteArray {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(pairToken.toByteArray(Charsets.UTF_8))
+            return digest.copyOfRange(0, 4)
+        }
     }
 }

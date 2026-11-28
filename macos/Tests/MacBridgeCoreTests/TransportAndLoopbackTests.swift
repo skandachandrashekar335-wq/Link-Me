@@ -1,3 +1,4 @@
+import AppKit
 import CryptoKit
 import Foundation
 import Testing
@@ -581,5 +582,64 @@ struct TransportAndLoopbackTests {
         let decodedScreen = try ScreenFramePacket.decode(from: clientRx[0].payload)
         #expect(decodedScreen == screenPkt)
         #expect(decodedScreen.jpegData == jpeg)
+    }
+
+    @Test("MirrorInputTranslator normalizes coordinates, classifies pointers/scrolls, maps Mac shortcuts, and persists MirrorAuthPolicy")
+    @MainActor
+    func mirrorInputTranslatorAndAuthSettings() async throws {
+        // 1. Coordinate normalization with letterboxed aspect-fit content rect
+        let rect = CGRect(x: 20, y: 40, width: 320, height: 640)
+        let center = try #require(MirrorInputTranslator.normalizePoint(point: CGPoint(x: 180, y: 360), contentRect: rect))
+        #expect(abs(center.x - 0.5) < 0.001)
+        #expect(abs(center.y - 0.5) < 0.001)
+
+        let clamped = try #require(MirrorInputTranslator.normalizePoint(point: CGPoint(x: -50, y: 999), contentRect: rect))
+        #expect(clamped.x == 0.0 && clamped.y == 1.0)
+        #expect(MirrorInputTranslator.normalizePoint(point: .zero, contentRect: .zero) == nil)
+
+        // 2. Pointer classification: tap (<6px, <350ms), long_press (>=400ms), swipe (>=6px)
+        let p0 = NormalizedMirrorPoint(x: 0.25, y: 0.75)
+        let p1 = NormalizedMirrorPoint(x: 0.25, y: 0.25)
+        #expect(MirrorInputTranslator.classifyPointerRelease(startPoint: p0, endPoint: p0, pixelDistance: 2.0, elapsedSeconds: 0.12) == .tap(x: 0.25, y: 0.75))
+        #expect(MirrorInputTranslator.classifyPointerRelease(startPoint: p0, endPoint: p0, pixelDistance: 2.0, elapsedSeconds: 0.45) == .longPress(x: 0.25, y: 0.75, durationMs: 550))
+        let drag = MirrorInputTranslator.classifyPointerRelease(startPoint: p0, endPoint: p1, pixelDistance: 120.0, elapsedSeconds: 0.25)
+        #expect(drag.type == "swipe" && drag.y1 == 0.75 && drag.y2 == 0.25)
+
+        // 3. Trackpad scroll-to-swipe translation & deadzone
+        #expect(MirrorInputTranslator.translateScrollToSwipe(deltaX: 1, deltaY: 2) == nil)
+        let scrollSwipe = try #require(MirrorInputTranslator.translateScrollToSwipe(deltaX: 0, deltaY: -40, anchor: NormalizedMirrorPoint(x: 0.5, y: 0.5)))
+        #expect(scrollSwipe.type == "swipe")
+        #expect((scrollSwipe.y2 ?? 1.0) < (scrollSwipe.y1 ?? 0.0))
+
+        // 4. Mac keyboard & shortcut mapping
+        #expect(MirrorInputTranslator.translateKeyDown(keyCode: 18, characters: "1", charactersIgnoringModifiers: "1", modifierFlags: .command) == .remoteInput(.key("home")))
+        #expect(MirrorInputTranslator.translateKeyDown(keyCode: 19, characters: "2", charactersIgnoringModifiers: "2", modifierFlags: .command) == .remoteInput(.key("recents")))
+        #expect(MirrorInputTranslator.translateKeyDown(keyCode: 53, characters: nil, charactersIgnoringModifiers: nil, modifierFlags: []) == .remoteInput(.key("back")))
+        #expect(MirrorInputTranslator.translateKeyDown(keyCode: 36, characters: "\r", charactersIgnoringModifiers: "\r", modifierFlags: []) == .remoteInput(.key("enter")))
+        #expect(MirrorInputTranslator.translateKeyDown(keyCode: 51, characters: "\u{7F}", charactersIgnoringModifiers: "\u{7F}", modifierFlags: []) == .remoteInput(.key("backspace")))
+        #expect(MirrorInputTranslator.translateKeyDown(keyCode: 126, characters: nil, charactersIgnoringModifiers: nil, modifierFlags: []) == .remoteInput(.key("dpad_up")))
+        #expect(MirrorInputTranslator.translateKeyDown(keyCode: 8, characters: "c", charactersIgnoringModifiers: "c", modifierFlags: .command) == .copyClipboardThenKey)
+        #expect(MirrorInputTranslator.translateKeyDown(keyCode: 9, characters: "v", charactersIgnoringModifiers: "v", modifierFlags: .command) == .syncClipboardThenPaste)
+        #expect(MirrorInputTranslator.translateKeyDown(keyCode: 4, characters: "h", charactersIgnoringModifiers: "h", modifierFlags: []) == .bufferedText("h"))
+
+        // 5. 35ms text batcher coalesces rapid typing into one REMOTE_INPUT frame
+        var batchedStrings: [String] = []
+        let batcher = MirrorTextBatcher(intervalMs: 35) { batchedStrings.append($0) }
+        batcher.enqueue("h")
+        batcher.enqueue("i")
+        batcher.enqueue("!")
+        try await Task.sleep(for: .milliseconds(90))
+        #expect(batchedStrings == ["hi!"])
+
+        // 6. High-FPS 0x0D SCREEN_CONTROL & MirrorAuthPolicy persistence
+        let ctrl60 = ScreenControlPayload(action: "start", source: "android", fps: 60, quality: 65)
+        #expect(ctrl60.fps == 60 && ctrl60.quality == 65)
+        let suiteName = "linkme.mirror.auth.test.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        let prefs1 = BridgePreferences(defaults: defaults, keyPrefix: "test.")
+        prefs1.mirrorAuthPolicy = .askEveryTime
+        let prefs2 = BridgePreferences(defaults: defaults, keyPrefix: "test.")
+        #expect(prefs2.mirrorAuthPolicy == .askEveryTime)
+        defaults.removePersistentDomain(forName: suiteName)
     }
 }

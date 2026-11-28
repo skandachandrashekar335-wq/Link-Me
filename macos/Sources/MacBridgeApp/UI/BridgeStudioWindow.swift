@@ -1041,9 +1041,54 @@ struct BridgeStudioWindow: View {
             .padding(16)
             .liquidGlassCard(pal, cornerRadius: 18)
 
-            // 04 Device & Pairing Management
+            // 04 Phone Mirroring Security Settings (Ask every time vs Automatically authenticate)
             VStack(alignment: .leading, spacing: 12) {
-                Text("04 / SECURITY • DEVICE & PAIRING MANAGEMENT")
+                Text("04 / SECURITY • PHONE MIRRORING SETTINGS")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(pal.secondaryText)
+
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Unlock Authentication Mode")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(viewModel.preferences.mirrorAuthPolicy.description)
+                            .font(.system(size: 11))
+                            .foregroundStyle(pal.secondaryText)
+                    }
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { viewModel.preferences.mirrorAuthPolicy },
+                        set: { viewModel.preferences.mirrorAuthPolicy = $0 }
+                    )) {
+                        ForEach(MirrorAuthPolicy.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 220)
+                }
+
+                HStack {
+                    Button {
+                        viewModel.openFloatingMirrorWindow()
+                    } label: {
+                        Label("Launch Floating Phone Mirror (⌘M)", systemImage: "iphone.and.arrow.forward")
+                            .font(.system(size: 11, weight: .semibold))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 7)
+                            .background(Capsule().fill(pal.secondaryAccent))
+                            .foregroundStyle(pal.activeCardInk)
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                }
+            }
+            .padding(16)
+            .liquidGlassCard(pal, cornerRadius: 18)
+
+            // 05 Device & Pairing Management
+            VStack(alignment: .leading, spacing: 12) {
+                Text("05 / DEVICE & PAIRING MANAGEMENT")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundStyle(pal.secondaryText)
 

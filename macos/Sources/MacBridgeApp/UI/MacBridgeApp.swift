@@ -54,6 +54,19 @@ struct MacBridgeApp: App {
             Image(nsImage: MenuBarVectorIcon.makeTemplateImage(isActive: viewModel.isBluetoothConnected || viewModel.bridgeState == .activeWifiStream))
         }
         .menuBarExtraStyle(.window)
+        .commands {
+            CommandMenu("Mirror") {
+                Button("Mirror Phone") {
+                    viewModel.openFloatingMirrorWindow()
+                }
+                .keyboardShortcut("m", modifiers: .command)
+
+                Button("Open Link-Me Studio") {
+                    openWindow(id: "studio")
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+            }
+        }
     }
 }
 
@@ -155,12 +168,14 @@ final class BridgeDashboardViewModel: ObservableObject {
     // Live Screen Mirroring state (0x0C / 0x0D / 0x0E)
     @Published var isViewingRemoteScreen: Bool = false
     @Published var isSharingLocalScreen: Bool = false
+    @Published var isMirrorAuthenticated: Bool = false
     @Published var remoteScreenImage: NSImage?
     @Published var remoteScreenWidth: Int = 1080
     @Published var remoteScreenHeight: Int = 2400
     @Published var remoteScreenSizeText: String = ""
     @Published var remoteMirrorFps: Int = 0
     @Published var mirrorStatusText: String = "Standby"
+    private var mirrorWindowController: PhoneMirrorWindowController?
     @Published var isBluetoothConnected: Bool = false
     @Published var latencyMs: Int?
     @Published var clipboardSyncEnabled: Bool = true
@@ -408,6 +423,8 @@ final class BridgeDashboardViewModel: ObservableObject {
     func teardownOnQuit() {
         telemetryLoopTask?.cancel()
         telemetryLoopTask = nil
+        mirrorWindowController?.closeMirrorWindow()
+        mirrorWindowController = nil
         Task { await screenMirrorManager.stopSharing() }
         bleCentralManager?.stopScanning()
         blePeripheralManager?.stop()
@@ -499,21 +516,49 @@ final class BridgeDashboardViewModel: ObservableObject {
         UNUserNotificationCenter.current().add(req)
     }
 
-    func toggleViewingPhoneScreen() {
-        let nextStart = !isViewingRemoteScreen
-        isViewingRemoteScreen = nextStart
-        mirrorStatusText = nextStart ? "Requesting \(peerName) screen..." : "Standby"
-        if !nextStart {
-            remoteScreenImage = nil
-            remoteMirrorFps = 0
+    func openFloatingMirrorWindow() {
+        if mirrorWindowController == nil {
+            mirrorWindowController = PhoneMirrorWindowController(viewModel: self)
         }
-        let fps = bridgeState == .activeWifiStream ? 24 : 3
-        let ctrl = ScreenControlPayload(action: nextStart ? "start" : "stop", source: "android", fps: fps, quality: 60)
+        mirrorWindowController?.showAndAuthenticateIfNeeded()
+    }
+
+    func startPhoneMirrorStream() {
+        if !isViewingRemoteScreen {
+            isViewingRemoteScreen = true
+        }
+        mirrorStatusText = "Requesting \(peerName) screen..."
+        mirrorWindowController?.syncFromViewModel()
+        let fps = bridgeState == .activeWifiStream ? 60 : 3
+        let ctrl = ScreenControlPayload(action: "start", source: "android", fps: fps, quality: 65)
         Task {
             if let data = try? JSONEncoder().encode(ctrl),
                let frame = try? await transportManager.makeFrame(messageType: .screenControl, payload: data) {
                 try? await transportManager.sendResilientFrame(frame, preferBle: true)
             }
+        }
+    }
+
+    func stopPhoneMirrorStream() {
+        isViewingRemoteScreen = false
+        remoteScreenImage = nil
+        remoteMirrorFps = 0
+        mirrorStatusText = "Standby"
+        mirrorWindowController?.syncFromViewModel()
+        let ctrl = ScreenControlPayload(action: "stop", source: "android", fps: 24, quality: 65)
+        Task {
+            if let data = try? JSONEncoder().encode(ctrl),
+               let frame = try? await transportManager.makeFrame(messageType: .screenControl, payload: data) {
+                try? await transportManager.sendResilientFrame(frame, preferBle: true)
+            }
+        }
+    }
+
+    func toggleViewingPhoneScreen() {
+        if isViewingRemoteScreen {
+            stopPhoneMirrorStream()
+        } else {
+            startPhoneMirrorStream()
         }
     }
 
@@ -841,6 +886,7 @@ final class BridgeDashboardViewModel: ObservableObject {
                     mirrorFpsWindowStart = now
                 }
                 mirrorStatusText = "Live Mirror • \(packet.width)×\(packet.height)"
+                mirrorWindowController?.syncFromViewModel()
             }
 
         default:

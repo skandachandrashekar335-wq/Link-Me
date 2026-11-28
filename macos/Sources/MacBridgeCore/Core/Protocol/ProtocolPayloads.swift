@@ -425,15 +425,15 @@ public struct PairAckPayload: Codable, Sendable, Equatable {
 
 /// Screen Mirroring session control (0x0D SCREEN_CONTROL).
 public struct ScreenControlPayload: Codable, Sendable, Equatable {
-    public let action: String   // "start" | "stop"
+    public let action: String   // "start" | "stop" | "pause" | "resume"
     public let source: String   // "macos" | "android"
     public let fps: Int
     public let quality: Int
 
-    public init(action: String, source: String, fps: Int = 24, quality: Int = 60) {
+    public init(action: String, source: String, fps: Int = 60, quality: Int = 65) {
         self.action = action
         self.source = source
-        self.fps = min(30, max(1, fps))
+        self.fps = min(60, max(1, fps))
         self.quality = min(95, max(20, quality))
     }
 }
@@ -502,7 +502,7 @@ public struct ScreenFramePacket: Sendable, Equatable {
 
 /// Interactive Mac-to-Android cursor/keyboard control event (0x0E REMOTE_INPUT).
 public struct RemoteInputPayload: Codable, Sendable, Equatable {
-    public let type: String        // "tap" | "swipe" | "long_press" | "key"
+    public let type: String        // "tap" | "swipe" | "long_press" | "key" | "text"
     public let x: Double?
     public let y: Double?
     public let x1: Double?
@@ -510,7 +510,7 @@ public struct RemoteInputPayload: Codable, Sendable, Equatable {
     public let x2: Double?
     public let y2: Double?
     public let durationMs: Int?
-    public let action: String?     // "back" | "home" | "recents" | "text"
+    public let action: String?     // "back" | "home" | "recents" | "enter" | "backspace" | "dpad_*" | "paste" | "text"
     public let text: String?
 
     public init(
@@ -547,6 +547,10 @@ public struct RemoteInputPayload: Codable, Sendable, Equatable {
 
     public static func swipe(x1: Double, y1: Double, x2: Double, y2: Double, durationMs: Int = 220) -> RemoteInputPayload {
         RemoteInputPayload(type: "swipe", x1: x1, y1: y1, x2: x2, y2: y2, durationMs: durationMs)
+    }
+
+    public static func text(_ content: String) -> RemoteInputPayload {
+        RemoteInputPayload(type: "text", text: content)
     }
 
     public static func key(_ action: String, text: String? = nil) -> RemoteInputPayload {

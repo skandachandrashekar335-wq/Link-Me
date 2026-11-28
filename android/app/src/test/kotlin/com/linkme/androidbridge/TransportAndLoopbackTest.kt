@@ -34,6 +34,7 @@ import com.linkme.androidbridge.core.transport.TransportManager
 import com.linkme.androidbridge.core.transport.WifiTlsClient
 import com.linkme.androidbridge.core.transport.WifiTlsServer
 import com.linkme.androidbridge.service.FileTransferManager
+import com.linkme.androidbridge.service.RemoteControlIpcBridge
 import com.linkme.androidbridge.service.RemoteInputCoordinateMapper
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -648,6 +649,15 @@ class TransportAndLoopbackTest {
             val decodedScreen = ScreenFramePacket.decode(clientRx[0].payload)
             assertEquals(screenPkt, decodedScreen)
             assertArrayEquals(jpeg, decodedScreen.jpegData)
+
+            val highFpsCtrl = ScreenControlPayload(action = "start", source = "android", fps = 60, quality = 65)
+            val ctrlJson = Json.encodeToString(highFpsCtrl)
+            assertTrue(ctrlJson.contains("\"fps\":60") && ctrlJson.contains("\"quality\":65"))
+
+            val textInputJson = RemoteControlIpcBridge.encodeRemoteInputJson(
+                RemoteInputPayload(type = "text", text = "search link-me")
+            )
+            assertTrue(textInputJson.contains("search link-me"))
         } finally {
             client.close()
             server.stop()

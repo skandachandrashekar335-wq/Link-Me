@@ -43,6 +43,27 @@ public enum ClipboardDirection: String, Codable, CaseIterable, Sendable {
     }
 }
 
+public enum MirrorAuthPolicy: String, Codable, CaseIterable, Sendable {
+    case askEveryTime
+    case automaticallyAuthenticate
+
+    public var displayName: String {
+        switch self {
+        case .askEveryTime: return "Ask every time"
+        case .automaticallyAuthenticate: return "Automatically authenticate"
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .askEveryTime:
+            return "Require Touch ID, Apple Watch, or Mac password before unlocking live Phone Mirroring."
+        case .automaticallyAuthenticate:
+            return "Unlock Phone Mirroring automatically whenever your Mac is already unlocked."
+        }
+    }
+}
+
 public struct BridgeRgba: Sendable, Equatable {
     public let r: Double
     public let g: Double
@@ -217,6 +238,10 @@ public final class BridgePreferences {
         didSet { persistAndNotify() }
     }
 
+    public var mirrorAuthPolicy: MirrorAuthPolicy {
+        didSet { persistAndNotify() }
+    }
+
     public var paletteSpec: BridgePaletteSpec {
         BridgePaletteSpec.forTheme(accentTheme)
     }
@@ -230,7 +255,8 @@ public final class BridgePreferences {
             bleOnlyBatterySaver: bleOnlyBatterySaver,
             autoAcceptFiles: autoAcceptFiles,
             clipboardDirection: clipboardDirection,
-            deviceAlias: normalizedAlias
+            deviceAlias: normalizedAlias,
+            mirrorAuthPolicy: mirrorAuthPolicy
         )
     }
 
@@ -271,6 +297,13 @@ public final class BridgePreferences {
         self.deviceAlias = (storedAlias?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
             ? storedAlias!
             : defaultAlias
+
+        if let rawMirrorAuth = defaults.string(forKey: keyPrefix + "mirrorAuthPolicy"),
+           let parsedMirrorAuth = MirrorAuthPolicy(rawValue: rawMirrorAuth) {
+            self.mirrorAuthPolicy = parsedMirrorAuth
+        } else {
+            self.mirrorAuthPolicy = .automaticallyAuthenticate
+        }
     }
 
     public nonisolated static func clampCooldown(_ seconds: Int) -> Int {
@@ -286,6 +319,7 @@ public final class BridgePreferences {
         defaults.set(autoAcceptFiles, forKey: keyPrefix + "autoAcceptFiles")
         defaults.set(clipboardDirection.rawValue, forKey: keyPrefix + "clipboardDirection")
         defaults.set(normalizedAlias, forKey: keyPrefix + "deviceAlias")
+        defaults.set(mirrorAuthPolicy.rawValue, forKey: keyPrefix + "mirrorAuthPolicy")
         onPreferencesChanged?(snapshot)
     }
 }
@@ -299,4 +333,5 @@ public struct BridgePreferencesSnapshot: Sendable, Equatable {
     public let autoAcceptFiles: Bool
     public let clipboardDirection: ClipboardDirection
     public let deviceAlias: String
+    public let mirrorAuthPolicy: MirrorAuthPolicy
 }

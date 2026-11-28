@@ -12,8 +12,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
 /**
- * Pure JVM-testable coordinate mapper clamping normalized [0.0, 1.0] mirror viewport coordinates
- * onto display pixel dimensions.
+ * Pure JVM-testable coordinate & text helper for Accessibility cursor, gesture, and keyboard execution.
  */
 object AddonRemoteInputMapper {
     fun toPixel(normalized: Double, maxDimensionPx: Int): Float {
@@ -21,12 +20,19 @@ object AddonRemoteInputMapper {
         val clamped = normalized.coerceIn(0.0, 1.0)
         return (clamped * maxDimensionPx.toDouble()).toFloat().coerceIn(0f, (maxDimensionPx - 1).toFloat())
     }
+
+    fun applyBackspace(current: String): String {
+        return if (current.isEmpty()) "" else current.dropLast(1)
+    }
+
+    fun applyAppendText(current: String, addition: String): String {
+        return if (current.isEmpty()) addition else "$current$addition"
+    }
 }
 
 /**
- * Modular AccessibilityService hosted inside AndroidBridge-NotifyAddon so the primary APK stays
- * Play-Protect clean (zero BIND_ACCESSIBILITY_SERVICE in core AndroidBridge manifest).
- * Receives 0x0E REMOTE_INPUT commands exclusively via signature-verified MIRROR_IPC broadcasts.
+ * Modular AccessibilityService hosted strictly inside AndroidBridge-NotifyAddon so the primary APK stays
+ * Play-Protect clean. Receives 0x0E REMOTE_INPUT frames exclusively over signature-verified MIRROR_IPC.
  */
 class RemoteControlAccessibilityService : AccessibilityService() {
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -85,16 +91,37 @@ class RemoteControlAccessibilityService : AccessibilityService() {
                     performStroke(px1, py1, px2, py2, durationMs = dur)
                 }
 
-                "key" -> {
-                    when (payload.action?.lowercase()) {
-                        "back" -> performGlobalAction(GLOBAL_ACTION_BACK)
-                        "home" -> performGlobalAction(GLOBAL_ACTION_HOME)
-                        "recents" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
-                        "text" -> injectText(payload.text.orEmpty())
-                    }
-                }
+                "text" -> injectText(payload.text.orEmpty())
+
+                "key" -> handleKeyAction(payload.action?.lowercase(), payload.text.orEmpty(), screenW, screenH)
             }
         }
+    }
+
+    private fun handleKeyAction(action: String?, text: String, screenW: Int, screenH: Int) {
+        when (action) {
+            "back" -> performGlobalAction(GLOBAL_ACTION_BACK)
+            "home" -> performGlobalAction(GLOBAL_ACTION_HOME)
+            "recents" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
+            "text" -> injectText(text)
+            "backspace" -> performBackspace()
+            "enter" -> performEnterAction()
+            "paste" -> performPaste()
+            "dpad_up" -> performDirectionalSwipe(0.5, 0.55, 0.5, 0.35, screenW, screenH)
+            "dpad_down" -> performDirectionalSwipe(0.5, 0.45, 0.5, 0.65, screenW, screenH)
+            "dpad_left" -> performDirectionalSwipe(0.6, 0.5, 0.35, 0.5, screenW, screenH)
+            "dpad_right" -> performDirectionalSwipe(0.4, 0.5, 0.65, 0.5, screenW, screenH)
+        }
+    }
+
+    private fun performDirectionalSwipe(x1: Double, y1: Double, x2: Double, y2: Double, w: Int, h: Int) {
+        performStroke(
+            AddonRemoteInputMapper.toPixel(x1, w),
+            AddonRemoteInputMapper.toPixel(y1, h),
+            AddonRemoteInputMapper.toPixel(x2, w),
+            AddonRemoteInputMapper.toPixel(y2, h),
+            durationMs = 140L
+        )
     }
 
     private fun performStroke(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long) {
@@ -109,15 +136,61 @@ class RemoteControlAccessibilityService : AccessibilityService() {
         dispatchGesture(gesture, null, null)
     }
 
-    private fun injectText(text: String) {
-        if (text.isEmpty()) return
-        val focused = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return
+    private fun findFocusedEditableNode(): AccessibilityNodeInfo? {
+        val root = rootInActiveWindow ?: return null
+        val direct = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        if (direct != null && direct.isEditable) {
+            return direct
+        }
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.addLast(root)
+        while (queue.isNotEmpty()) {
+            val node = queue.removeFirst()
+            if (node.isEditable && node.isVisibleToUser) {
+                node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                return node
+            }
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.addLast(it) }
+            }
+        }
+        return direct
+    }
+
+    private fun injectText(addition: String) {
+        if (addition.isEmpty()) return
+        val focused = findFocusedEditableNode() ?: return
         val currentText = focused.text?.toString().orEmpty()
-        val combined = if (currentText.isEmpty()) text else "$currentText$text"
+        val combined = AddonRemoteInputMapper.applyAppendText(currentText, addition)
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, combined)
         }
         focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    private fun performBackspace() {
+        val focused = findFocusedEditableNode() ?: return
+        val currentText = focused.text?.toString().orEmpty()
+        val updated = AddonRemoteInputMapper.applyBackspace(currentText)
+        val args = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, updated)
+        }
+        focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    private fun performEnterAction() {
+        val focused = findFocusedEditableNode() ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (focused.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)) {
+                return
+            }
+        }
+        focused.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    }
+
+    private fun performPaste() {
+        val focused = findFocusedEditableNode() ?: return
+        focused.performAction(AccessibilityNodeInfo.ACTION_PASTE)
     }
 
     companion object {

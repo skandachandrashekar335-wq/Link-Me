@@ -47,6 +47,16 @@ class AddonIpcContractTest {
         assertEquals("tap", decoded?.type)
         assertEquals(0.5, decoded?.x ?: 0.0, 0.0001)
 
+        val enterMsg = AddonIpcContract.decodeRemoteInput("""{"msgType":"REMOTE_INPUT","type":"key","action":"enter"}""")
+        assertEquals("enter", enterMsg?.action)
+
+        val dpadMsg = AddonIpcContract.decodeRemoteInput("""{"msgType":"REMOTE_INPUT","type":"key","action":"dpad_down"}""")
+        assertEquals("dpad_down", dpadMsg?.action)
+
+        val textMsg = AddonIpcContract.decodeRemoteInput("""{"msgType":"REMOTE_INPUT","type":"text","text":"hello link-me"}""")
+        assertEquals("text", textMsg?.type)
+        assertEquals("hello link-me", textMsg?.text)
+
         assertNull(AddonIpcContract.decodeRemoteInput(null))
         assertNull(AddonIpcContract.decodeRemoteInput("invalid"))
         assertNull(AddonIpcContract.decodeRemoteInput("x".repeat(300 * 1024)))
@@ -54,5 +64,8 @@ class AddonIpcContractTest {
         assertEquals(540f, AddonRemoteInputMapper.toPixel(0.5, 1080), 0.1f)
         assertEquals(0f, AddonRemoteInputMapper.toPixel(-0.2, 1080), 0.1f)
         assertEquals(2399f, AddonRemoteInputMapper.toPixel(1.2, 2400), 0.1f)
+        assertEquals("hell", AddonRemoteInputMapper.applyBackspace("hello"))
+        assertEquals("", AddonRemoteInputMapper.applyBackspace(""))
+        assertEquals("hello world", AddonRemoteInputMapper.applyAppendText("hello ", "world"))
     }
 }

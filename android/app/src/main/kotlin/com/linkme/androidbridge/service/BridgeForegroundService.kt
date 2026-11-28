@@ -65,6 +65,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * ANR-safe connectedDevice ForegroundService.
@@ -100,6 +101,8 @@ class BridgeForegroundService : Service() {
     private var telemetryScheduler: ScheduledExecutorService? = null
     private val fileSendQueue = ConcurrentLinkedQueue<String>()
     private val fileSendBusy = AtomicBoolean(false)
+    private val pendingScreenPacket = AtomicReference<ScreenFramePacket?>(null)
+    private val screenSendBusy = AtomicBoolean(false)
     @Volatile private var mirrorFpsWindowStartMs: Long = 0L
     @Volatile private var mirrorFrameCounter: Int = 0
 
@@ -457,18 +460,17 @@ class BridgeForegroundService : Service() {
             }
 
             BridgeActivityHub.onSendScreenFrameBytes = { width, height, timestampMs, jpegBytes ->
-                serviceScope.launch {
-                    runCatching {
-                        val packet = ScreenFramePacket(
-                            source = ScreenFramePacket.SOURCE_ANDROID,
-                            width = width,
-                            height = height,
-                            timestampMs = timestampMs,
-                            jpegData = jpegBytes
-                        )
-                        val frame = transport.makeFrame(WireMessageType.SCREEN_FRAME, packet.encode())
-                        transport.sendResilientFrame(frame, preferBle = false)
-                    }
+                runCatching {
+                    val packet = ScreenFramePacket(
+                        source = ScreenFramePacket.SOURCE_ANDROID,
+                        width = width,
+                        height = height,
+                        timestampMs = timestampMs,
+                        jpegData = jpegBytes
+                    )
+                    // Single-in-flight latest-frame slot: drops older buffered frames when Wi-Fi slows
+                    pendingScreenPacket.set(packet)
+                    drainPendingScreenFrame()
                 }
             }
 
@@ -753,13 +755,29 @@ class BridgeForegroundService : Service() {
                 runCatching { json.decodeFromString<ScreenControlPayload>(frame.payload.decodeToString()) }
                     .onSuccess { ctrl ->
                         if (ctrl.source == "android" && ctrl.action == "stop") {
-                            val stopIntent = Intent(this, ScreenMirrorService::class.java).apply {
-                                action = ScreenMirrorService.ACTION_STOP
+                            if (ScreenMirrorService.hasActiveSession) {
+                                val pauseIntent = Intent(this, ScreenMirrorService::class.java).apply {
+                                    action = ScreenMirrorService.ACTION_PAUSE
+                                }
+                                runCatching { startService(pauseIntent) }
+                            } else {
+                                val stopIntent = Intent(this, ScreenMirrorService::class.java).apply {
+                                    action = ScreenMirrorService.ACTION_STOP
+                                }
+                                runCatching { startService(stopIntent) }
                             }
-                            runCatching { startService(stopIntent) }
-                        } else if (ctrl.source == "android" && ctrl.action == "start") {
-                            BridgeActivityHub.updateMirrorState {
-                                it.copy(statusText = "Mac requested Android screen — open Mirror tab & tap Share Phone Screen")
+                        } else if (ctrl.source == "android" && (ctrl.action == "start" || ctrl.action == "resume")) {
+                            if (ScreenMirrorService.hasActiveSession) {
+                                val resumeIntent = Intent(this, ScreenMirrorService::class.java).apply {
+                                    action = ScreenMirrorService.ACTION_RESUME
+                                    putExtra(ScreenMirrorService.EXTRA_FPS, ctrl.fps)
+                                    putExtra(ScreenMirrorService.EXTRA_QUALITY, ctrl.quality)
+                                }
+                                runCatching { startService(resumeIntent) }
+                            } else {
+                                BridgeActivityHub.updateMirrorState {
+                                    it.copy(statusText = "Mac requested Android screen — open Mirror tab & tap Share Phone Screen once")
+                                }
                             }
                         }
                     }
@@ -905,6 +923,27 @@ class BridgeForegroundService : Service() {
         val bytes = json.encodeToString(payload).toByteArray(Charsets.UTF_8)
         val frame = transport.makeFrame(WireMessageType.PING_TELEMETRY, bytes)
         runCatching { transport.sendResilientFrame(frame, preferBle = true) }
+    }
+
+    private fun drainPendingScreenFrame() {
+        if (!screenSendBusy.compareAndSet(false, true)) return
+        serviceScope.launch {
+            try {
+                while (true) {
+                    val nextPacket = pendingScreenPacket.getAndSet(null) ?: break
+                    val transport = transportManager ?: break
+                    runCatching {
+                        val frame = transport.makeFrame(WireMessageType.SCREEN_FRAME, nextPacket.encode())
+                        transport.sendResilientFrame(frame, preferBle = false)
+                    }
+                }
+            } finally {
+                screenSendBusy.set(false)
+                if (pendingScreenPacket.get() != null) {
+                    drainPendingScreenFrame()
+                }
+            }
+        }
     }
 
     private fun drainOutboundFileQueue() {

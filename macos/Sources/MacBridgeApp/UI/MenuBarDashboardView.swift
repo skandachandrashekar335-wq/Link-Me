@@ -298,17 +298,32 @@ struct MenuBarDashboardView: View {
                 }
             }
 
-            // Bottom Primary CTA + Quick Theme Toggle
+            // Bottom Primary CTA + Floating Phone Mirror + Quick Theme Toggle
             HStack(spacing: 8) {
+                Button {
+                    viewModel.openFloatingMirrorWindow()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "iphone.and.arrow.forward")
+                        Text("Mirror Phone")
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Capsule().fill(pal.secondaryAccent))
+                    .foregroundStyle(pal.activeCardInk)
+                }
+                .buttonStyle(.plain)
+
                 Button {
                     openWindow(id: "studio")
                     NSApp.activate(ignoringOtherApps: true)
                 } label: {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 5) {
                         Image(systemName: "macwindow.on.rectangle")
-                        Text("Open Link-Me Studio")
+                        Text("Open Studio")
                     }
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
                     .background(Capsule().fill(pal.primaryAccent))

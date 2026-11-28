@@ -55,6 +55,18 @@ struct ScreenMirrorView: View {
                 .help("Capture trackpad scroll & keystrokes when hovering/clicking the mirrored phone")
 
                 Button {
+                    viewModel.openFloatingMirrorWindow()
+                } label: {
+                    Label("Float Phone (⌘M)", systemImage: "macwindow.on.rectangle")
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Capsule().fill(pal.secondaryAccent))
+                        .foregroundStyle(pal.activeCardInk)
+                }
+                .buttonStyle(.plain)
+
+                Button {
                     viewModel.toggleViewingPhoneScreen()
                 } label: {
                     Label(

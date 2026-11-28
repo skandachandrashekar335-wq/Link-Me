@@ -18,6 +18,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.linkme.androidbridge.R
@@ -25,8 +26,8 @@ import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Foreground MediaProjection service capturing Android display frames (scaled <= 720p)
- * and compressing to JPEG for encrypted 0x0C SCREEN_FRAME streaming to MacBridge.
+ * Foreground MediaProjection service capturing Android display frames (up to 720x1600 @ 30-60 FPS over Wi-Fi)
+ * with partial WakeLock + seamless pause/resume so Mac can toggle mirroring once permission is granted.
  */
 class ScreenMirrorService : Service() {
     private var mediaProjection: MediaProjection? = null
@@ -34,11 +35,13 @@ class ScreenMirrorService : Service() {
     private var imageReader: ImageReader? = null
     private var handlerThread: HandlerThread? = null
     private var captureHandler: Handler? = null
+    private var wakeLock: PowerManager.WakeLock? = null
 
     private val isEncoding = AtomicBoolean(false)
+    private val isStreamingActive = AtomicBoolean(false)
     @Volatile private var lastSentAtMs: Long = 0L
-    @Volatile private var targetFps: Int = 12
-    @Volatile private var jpegQuality: Int = 55
+    @Volatile private var targetFps: Int = 60
+    @Volatile private var jpegQuality: Int = 65
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -48,9 +51,33 @@ class ScreenMirrorService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            stopCaptureAndSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                stopCaptureAndSelf()
+                return START_NOT_STICKY
+            }
+
+            ACTION_PAUSE -> {
+                isStreamingActive.set(false)
+                releaseWakeLock()
+                BridgeActivityHub.updateMirrorState {
+                    it.copy(isSharingLocal = false, statusText = "Session standby (Mac can resume anytime)")
+                }
+                return START_NOT_STICKY
+            }
+
+            ACTION_RESUME -> {
+                targetFps = (intent.getIntExtra(EXTRA_FPS, 60)).coerceIn(1, 60)
+                jpegQuality = (intent.getIntExtra(EXTRA_QUALITY, 65)).coerceIn(25, 90)
+                if (mediaProjection != null && virtualDisplay != null) {
+                    isStreamingActive.set(true)
+                    acquireWakeLock()
+                    BridgeActivityHub.updateMirrorState {
+                        it.copy(isSharingLocal = true, statusText = "Streaming Android @ ${targetFps}fps")
+                    }
+                }
+                return START_NOT_STICKY
+            }
         }
 
         val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -71,8 +98,8 @@ class ScreenMirrorService : Service() {
             @Suppress("DEPRECATION")
             intent?.getParcelableExtra(EXTRA_RESULT_DATA)
         }
-        targetFps = (intent?.getIntExtra(EXTRA_FPS, 24) ?: 24).coerceIn(1, 30)
-        jpegQuality = (intent?.getIntExtra(EXTRA_QUALITY, 60) ?: 60).coerceIn(25, 90)
+        targetFps = (intent?.getIntExtra(EXTRA_FPS, 60) ?: 60).coerceIn(1, 60)
+        jpegQuality = (intent?.getIntExtra(EXTRA_QUALITY, 65) ?: 65).coerceIn(25, 90)
 
         if (resultCode != Activity.RESULT_OK || resultData == null) {
             stopCaptureAndSelf()
@@ -81,6 +108,28 @@ class ScreenMirrorService : Service() {
 
         startCapture(resultCode, resultData)
         return START_NOT_STICKY
+    }
+
+    private fun acquireWakeLock() {
+        runCatching {
+            if (wakeLock == null) {
+                val pm = getSystemService(PowerManager::class.java) ?: return
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LinkMe:ScreenMirrorWake").apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (wakeLock?.isHeld == false) {
+                wakeLock?.acquire(30 * 60 * 1000L)
+            }
+        }
+    }
+
+    private fun releaseWakeLock() {
+        runCatching {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+        }
     }
 
     private fun startCapture(resultCode: Int, data: Intent) {
@@ -108,7 +157,8 @@ class ScreenMirrorService : Service() {
         val metrics = resources.displayMetrics
         val srcW = metrics.widthPixels.coerceAtLeast(360)
         val srcH = metrics.heightPixels.coerceAtLeast(640)
-        val maxEdge = if (BridgeActivityHub.wifiConnected.value) 720 else 540
+        val wifiReady = BridgeActivityHub.wifiConnected.value
+        val maxEdge = if (wifiReady) 720 else 540
         val scale = minOf(1f, maxEdge.toFloat() / minOf(srcW, srcH).toFloat())
         val outW = (srcW * scale).toInt().coerceAtLeast(320)
         val outH = (srcH * scale).toInt().coerceAtLeast(320)
@@ -117,9 +167,13 @@ class ScreenMirrorService : Service() {
         reader.setOnImageAvailableListener({ r ->
             val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
             try {
+                if (!isStreamingActive.get()) {
+                    return@setOnImageAvailableListener
+                }
                 val now = System.currentTimeMillis()
                 val bleOnly = !BridgeActivityHub.wifiConnected.value
                 val effFps = if (bleOnly) minOf(3, targetFps) else targetFps
+                val effQuality = if (bleOnly) minOf(48, jpegQuality) else jpegQuality
                 val minInterval = 1000L / effFps.coerceAtLeast(1)
                 if (now - lastSentAtMs < minInterval || !isEncoding.compareAndSet(false, true)) {
                     return@setOnImageAvailableListener
@@ -142,7 +196,7 @@ class ScreenMirrorService : Service() {
                         paddedBitmap
                     }
                     val baos = ByteArrayOutputStream(65_536)
-                    cropped.compress(Bitmap.CompressFormat.JPEG, jpegQuality, baos)
+                    cropped.compress(Bitmap.CompressFormat.JPEG, effQuality, baos)
                     cropped.recycle()
                     val jpegBytes = baos.toByteArray()
                     if (jpegBytes.size <= 950_000) {
@@ -170,16 +224,22 @@ class ScreenMirrorService : Service() {
         mediaProjection = projection
         imageReader = reader
         virtualDisplay = vDisplay
+        isStreamingActive.set(true)
+        hasActiveSession = true
+        acquireWakeLock()
 
         BridgeActivityHub.updateMirrorState {
             it.copy(
                 isSharingLocal = true,
-                statusText = "Sharing Android (${outW}x$outH @ ${targetFps}fps)"
+                statusText = "Streaming Android (${outW}x$outH @ ${targetFps}fps)"
             )
         }
     }
 
     private fun stopCaptureResourcesOnly() {
+        isStreamingActive.set(false)
+        hasActiveSession = false
+        releaseWakeLock()
         runCatching { virtualDisplay?.release() }
         virtualDisplay = null
         runCatching { imageReader?.close() }
@@ -228,9 +288,14 @@ class ScreenMirrorService : Service() {
             .build()
 
     companion object {
+        @Volatile
+        var hasActiveSession: Boolean = false
+
         const val CHANNEL_ID = "linkme_screen_mirror"
         const val NOTIFICATION_ID = 1004
         const val ACTION_START = "com.linkme.androidbridge.ACTION_MIRROR_START"
+        const val ACTION_RESUME = "com.linkme.androidbridge.ACTION_MIRROR_RESUME"
+        const val ACTION_PAUSE = "com.linkme.androidbridge.ACTION_MIRROR_PAUSE"
         const val ACTION_STOP = "com.linkme.androidbridge.ACTION_MIRROR_STOP"
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"

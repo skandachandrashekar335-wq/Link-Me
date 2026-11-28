@@ -220,7 +220,8 @@ data class PairCommitPayload(
     val sasMacHex: String,
     val batteryLevel: Int,
     val isCharging: Boolean,
-    val timestampMs: Long = System.currentTimeMillis()
+    val timestampMs: Long = System.currentTimeMillis(),
+    val pairToken: String? = null
 )
 
 @Serializable
@@ -240,8 +241,10 @@ data class PairAckPayload(
 data class ScreenControlPayload(
     val action: String,
     val source: String,
-    val fps: Int = 24,
-    val quality: Int = 60
+    val fps: Int = 60,
+    val quality: Int = 65,
+    val wake: Boolean = true,
+    val stealthBlack: Boolean = false
 )
 
 @Serializable

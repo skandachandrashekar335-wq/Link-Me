@@ -103,6 +103,16 @@ class MainActivity : ComponentActivity() {
                 val peerBatteryPercent by BridgeActivityHub.peerBatteryPercent.collectAsState()
                 val peerIsCharging by BridgeActivityHub.peerIsCharging.collectAsState()
                 val mirrorState by BridgeActivityHub.mirrorState.collectAsState()
+                val pairingStatus by BridgeActivityHub.pairingStatus.collectAsState()
+
+                LaunchedEffect(pairingStatus) {
+                    val st = pairingStatus
+                    if (st is com.linkme.androidbridge.service.PairingCommitStatus.Connected) {
+                        pairedPeerName = st.peerName
+                        pairedPeerFingerprint = st.pinnedCertSha256
+                        isPaired = true
+                    }
+                }
 
                 DisposableEffect(lifecycleOwner) {
                     val observer = LifecycleEventObserver { _, event ->
@@ -350,10 +360,10 @@ class MainActivity : ComponentActivity() {
                         text = {
                             Text(
                                 "AndroidBridge keeps Notification Listener permission out of the main APK so Play Protect installs cleanly.\n\n" +
-                                    "To enable notification mirroring:\n" +
-                                    "1. Install AndroidBridge-NotifyAddon-v1.1.0.apk from GitHub Releases\n" +
-                                    "2. Or run: adb install -r AndroidBridge-NotifyAddon-v1.1.0.apk\n" +
-                                    "3. Grant Notification Access to Link-Me Notify Add-on.",
+                                    "To enable notification & remote cursor mirroring:\n" +
+                                    "1. Install AndroidBridge-NotifyAddon-v2.0.0.apk from GitHub Releases\n" +
+                                    "2. Or run: adb install -r AndroidBridge-NotifyAddon-v2.0.0.apk\n" +
+                                    "3. Grant Notification & Accessibility access to Link-Me Notify Add-on.",
                                 fontSize = 13.sp,
                                 fontFamily = FontFamily.Default
                             )

@@ -31,12 +31,14 @@ public final class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate, 
     public static let rxWriteCharUUID = CBUUID(string: "414D0002-0000-1000-8000-00805F9B34FB")
     public static let txNotifyCharUUID = CBUUID(string: "414D0003-0000-1000-8000-00805F9B34FB")
     public static let l2capPsmCharUUID = CBUUID(string: "414D0004-0000-1000-8000-00805F9B34FB")
+    public static let deviceInfoCharUUID = CBUUID(string: "414D0005-0000-1000-8000-00805F9B34FB")
 
     private let trustStore: TrustStore
     private let queue = DispatchQueue(label: "com.linkme.macbridge.ble.peripheral")
     private var peripheralManager: CBPeripheralManager?
     private var txNotifyChar: CBMutableCharacteristic?
     private var l2capPsmChar: CBMutableCharacteristic?
+    private var deviceInfoChar: CBMutableCharacteristic?
     private var serviceAdded = false
     private var advertisedName: String = "MacBridge"
 
@@ -171,19 +173,26 @@ public final class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate, 
                 value: nil,
                 permissions: [.readable]
             )
+            let infoChar = CBMutableCharacteristic(
+                type: Self.deviceInfoCharUUID,
+                properties: [.read],
+                value: nil,
+                permissions: [.readable]
+            )
             self.txNotifyChar = txChar
             self.l2capPsmChar = psmChar
+            self.deviceInfoChar = infoChar
 
             let service = CBMutableService(type: Self.serviceUUID, primary: true)
-            service.characteristics = [rxChar, txChar, psmChar]
+            service.characteristics = [rxChar, txChar, psmChar, infoChar]
             pm.add(service)
             pm.publishL2CAPChannel(withEncryption: true)
             serviceAdded = true
         }
         if !pm.isAdvertising {
+            // Keep primary BLE advertisement strictly <= 28 bytes (Service UUID only); expose name via GATT read
             pm.startAdvertising([
-                CBAdvertisementDataServiceUUIDsKey: [Self.serviceUUID],
-                CBAdvertisementDataLocalNameKey: advertisedName
+                CBAdvertisementDataServiceUUIDsKey: [Self.serviceUUID]
             ])
         }
         updateDiagnostics(isPoweredOn: true, isAdvertising: true, message: "BLE GATT Peripheral Active")
@@ -277,6 +286,30 @@ public final class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate, 
         subscribedCentrals.removeAll { $0.identifier == central.identifier }
         reassembler.reset()
         updateDiagnostics(subscribers: subscribedCentrals.count, message: "Subscriber disconnected")
+    }
+
+    public func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveRead request: CBATTRequest) {
+        if request.characteristic.uuid == Self.deviceInfoCharUUID {
+            let nameData = Data(advertisedName.utf8)
+            guard request.offset <= nameData.count else {
+                peripheral.respond(to: request, withResult: .invalidOffset)
+                return
+            }
+            request.value = nameData.subdata(in: request.offset..<nameData.count)
+            peripheral.respond(to: request, withResult: .success)
+            return
+        }
+        if request.characteristic.uuid == Self.l2capPsmCharUUID,
+           let value = l2capPsmChar?.value {
+            guard request.offset <= value.count else {
+                peripheral.respond(to: request, withResult: .invalidOffset)
+                return
+            }
+            request.value = value.subdata(in: request.offset..<value.count)
+            peripheral.respond(to: request, withResult: .success)
+            return
+        }
+        peripheral.respond(to: request, withResult: .attributeNotFound)
     }
 
     public func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {

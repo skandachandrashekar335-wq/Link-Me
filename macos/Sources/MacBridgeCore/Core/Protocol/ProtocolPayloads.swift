@@ -364,6 +364,7 @@ public struct PairCommitPayload: Codable, Sendable, Equatable {
     public let batteryLevel: Int
     public let isCharging: Bool
     public let timestampMs: UInt64
+    public let pairToken: String?
 
     public init(
         deviceId: String,
@@ -374,7 +375,8 @@ public struct PairCommitPayload: Codable, Sendable, Equatable {
         sasMacHex: String,
         batteryLevel: Int,
         isCharging: Bool,
-        timestampMs: UInt64 = UInt64(Date().timeIntervalSince1970 * 1000)
+        timestampMs: UInt64 = UInt64(Date().timeIntervalSince1970 * 1000),
+        pairToken: String? = nil
     ) {
         self.msgType = "PAIR_COMMIT"
         self.deviceId = deviceId
@@ -386,6 +388,7 @@ public struct PairCommitPayload: Codable, Sendable, Equatable {
         self.batteryLevel = min(100, max(0, batteryLevel))
         self.isCharging = isCharging
         self.timestampMs = timestampMs
+        self.pairToken = pairToken
     }
 }
 
@@ -429,12 +432,33 @@ public struct ScreenControlPayload: Codable, Sendable, Equatable {
     public let source: String   // "macos" | "android"
     public let fps: Int
     public let quality: Int
+    public let wake: Bool
+    public let stealthBlack: Bool
 
-    public init(action: String, source: String, fps: Int = 60, quality: Int = 65) {
+    public init(
+        action: String,
+        source: String,
+        fps: Int = 60,
+        quality: Int = 65,
+        wake: Bool = true,
+        stealthBlack: Bool = false
+    ) {
         self.action = action
         self.source = source
         self.fps = min(60, max(1, fps))
         self.quality = min(95, max(20, quality))
+        self.wake = wake
+        self.stealthBlack = stealthBlack
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.action = try container.decode(String.self, forKey: .action)
+        self.source = try container.decode(String.self, forKey: .source)
+        self.fps = try container.decodeIfPresent(Int.self, forKey: .fps) ?? 60
+        self.quality = try container.decodeIfPresent(Int.self, forKey: .quality) ?? 65
+        self.wake = try container.decodeIfPresent(Bool.self, forKey: .wake) ?? false
+        self.stealthBlack = try container.decodeIfPresent(Bool.self, forKey: .stealthBlack) ?? false
     }
 }
 

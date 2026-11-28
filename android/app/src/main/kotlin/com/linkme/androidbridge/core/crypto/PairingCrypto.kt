@@ -19,7 +19,8 @@ data class PairingUriPayload(
     val tcpPort: Int,
     val bleServiceUuid: String? = DEFAULT_BLE_SERVICE_UUID,
     val lanHost: String? = null,
-    val deviceName: String? = null
+    val deviceName: String? = null,
+    val pairToken: String = nonceHex.take(16).lowercase()
 ) {
     val hasFullCertFingerprint: Boolean
         get() = certSha256Prefix.length == 64 && certSha256Prefix.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
@@ -28,15 +29,18 @@ data class PairingUriPayload(
         get() = buildString {
             append("linkme://pair?v=").append(version)
             append("&id=").append(encodeParam(deviceId))
+            append("&pk=").append(encodeParam(publicKeyBase64Url))
             append("&pub=").append(encodeParam(publicKeyBase64Url))
             append("&fp=").append(encodeParam(certSha256Prefix.lowercase()))
             append("&nonce=").append(encodeParam(nonceHex))
-            append("&port=").append(tcpPort)
-            if (!bleServiceUuid.isNullOrBlank()) {
-                append("&ble=").append(encodeParam(bleServiceUuid))
-            }
-            if (!lanHost.isNullOrBlank()) {
+            append("&tok=").append(encodeParam(pairToken))
+            append("&ble=").append(encodeParam(bleServiceUuid ?: DEFAULT_BLE_SERVICE_UUID))
+            if (!lanHost.isNullOrBlank() && tcpPort > 0) {
+                append("&ip=").append(encodeParam(lanHost))
                 append("&host=").append(encodeParam(lanHost))
+                append("&port=").append(tcpPort)
+            } else if (tcpPort > 0) {
+                append("&port=").append(tcpPort)
             }
             if (!deviceName.isNullOrBlank()) {
                 append("&name=").append(encodeParam(deviceName))
@@ -63,12 +67,15 @@ data class PairingUriPayload(
                 key to value
             }
             val version = query["v"]?.toIntOrNull() ?: error("Missing v")
-            require(version == 1) { "Unsupported pairing version" }
+            require(version == 1 || version == 2) { "Unsupported pairing version" }
             val deviceId = query["id"]?.takeIf { it.isNotEmpty() } ?: error("Missing id")
-            val pub = query["pub"]?.takeIf { it.isNotEmpty() } ?: error("Missing pub")
+            val pub = (query["pk"] ?: query["pub"])?.takeIf { it.isNotEmpty() } ?: error("Missing pub")
             val fp = query["fp"]?.takeIf { it.length >= 16 }?.lowercase() ?: error("Missing fp")
             val nonce = query["nonce"]?.takeIf { it.length == 32 } ?: error("Invalid nonce")
-            val port = query["port"]?.toIntOrNull()?.takeIf { it in 1..65535 } ?: error("Invalid port")
+            val port = query["port"]?.toIntOrNull()?.takeIf { it in 0..65535 }
+                ?: if (version >= 2) 0 else error("Invalid port")
+            val bleRaw = query["ble"]
+            val resolvedBle = if (bleRaw == null || bleRaw == "1" || bleRaw.isBlank()) DEFAULT_BLE_SERVICE_UUID else bleRaw
             return PairingUriPayload(
                 version = version,
                 deviceId = deviceId,
@@ -76,9 +83,10 @@ data class PairingUriPayload(
                 certSha256Prefix = fp,
                 nonceHex = nonce,
                 tcpPort = port,
-                bleServiceUuid = query["ble"] ?: DEFAULT_BLE_SERVICE_UUID,
-                lanHost = query["host"]?.takeIf { it.isNotBlank() },
-                deviceName = query["name"]?.takeIf { it.isNotBlank() }
+                bleServiceUuid = resolvedBle,
+                lanHost = (query["ip"] ?: query["host"])?.takeIf { it.isNotBlank() },
+                deviceName = query["name"]?.takeIf { it.isNotBlank() },
+                pairToken = query["tok"]?.takeIf { it.isNotBlank() } ?: nonce.take(16).lowercase()
             )
         }
     }
@@ -121,6 +129,14 @@ class PairingCrypto(
     fun isExpired(nowMs: Long = System.currentTimeMillis()): Boolean =
         (nowMs - createdAtMs) > SESSION_TTL_MS
 
+    val pairToken: String
+        get() {
+            val md = java.security.MessageDigest.getInstance("SHA-256")
+            md.update(nonce)
+            md.update(publicKey)
+            return md.digest().copyOfRange(0, 8).joinToString("") { "%02x".format(it) }
+        }
+
     fun makePairingUri(
         deviceId: String,
         certSha256Hex: String,
@@ -130,7 +146,7 @@ class PairingCrypto(
         deviceName: String? = null
     ): PairingUriPayload =
         PairingUriPayload(
-            version = 1,
+            version = 2,
             deviceId = deviceId,
             publicKeyBase64Url = publicKeyBase64Url,
             certSha256Prefix = certSha256Hex.lowercase(),
@@ -138,7 +154,8 @@ class PairingCrypto(
             tcpPort = tcpPort,
             bleServiceUuid = bleServiceUuid,
             lanHost = lanHost,
-            deviceName = deviceName
+            deviceName = deviceName,
+            pairToken = pairToken
         )
 
     fun deriveSecrets(

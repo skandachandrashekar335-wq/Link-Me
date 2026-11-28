@@ -642,4 +642,144 @@ struct TransportAndLoopbackTests {
         #expect(prefs2.mirrorAuthPolicy == .askEveryTime)
         defaults.removePersistentDomain(forName: suiteName)
     }
+
+    @Test("v2.0.0 offline QR bootstrap handshake, BLE-only Wi-Fi backoff, FILE_OFFER->FILE_RESPONSE->disk, and wake/stealth codecs")
+    func v2BootstrapPairingBleFallbackFileAcceptAndStealth() async throws {
+        // 1. Offline v=2 QR URI omits ip/port when nil and carries pairToken
+        let macStore = InMemorySecureStore()
+        let macIdMgr = IdentityManager(store: macStore)
+        let macId = try macIdMgr.loadOrCreateIdentity(deviceId: "11111111-1111-4111-8111-111111111111")
+        let macTrust = TrustStore(store: macStore)
+        let pairing = PairingFeature(identityManager: macIdMgr, trustStore: macTrust)
+
+        let (uri, _) = try await pairing.beginPairingSession(tcpPort: 0, deviceName: "Skanda MacBook Air M5")
+        let parsed = try PairingUriPayload.parse(uri.uriString)
+        #expect(parsed.version == 2)
+        #expect(!parsed.pairToken.isEmpty)
+        #expect(await pairing.hasActivePairingWindow())
+
+        // Offline URI with explicit v=2&ble=1 without ip/port must also parse cleanly
+        let offlineUri = "linkme://pair?v=2&id=\(macId.deviceId)&pk=\(parsed.publicKeyBase64Url)&fp=\(macId.certificateSha256Hex)&nonce=\(parsed.nonceHex)&tok=\(parsed.pairToken)&ble=1&name=MacBook%20Air"
+        let parsedOffline = try PairingUriPayload.parse(offlineUri)
+        #expect(parsedOffline.tcpPort == 0 && parsedOffline.lanHost == nil)
+        #expect(parsedOffline.bleServiceUuid == PairingUriPayload.defaultBleServiceUuid)
+
+        // 2. Unauthenticated bootstrap PAIR_COMMIT -> macOS saves TrustStore & replies PAIR_ACK
+        let androidStore = InMemorySecureStore()
+        let androidId = try IdentityManager(store: androidStore)
+            .loadOrCreateIdentity(deviceId: "22222222-2222-4222-8222-222222222222")
+        let androidTrust = TrustStore(store: androidStore)
+        let androidSession = PairingCrypto()
+        let nonceData = try #require(Data(hexString: parsed.nonceHex))
+        let derived = try androidSession.deriveSecrets(peerPublicKeyString: parsed.publicKeyBase64Url, nonce: nonceData)
+        let macHex = PairingCommitMac.computeHex(
+            sharedBleSecret: derived.sharedBleSecret,
+            deviceId: androidId.deviceId,
+            spkiSha256: androidId.certificateSha256Hex,
+            ephemeralPublicKey: androidSession.publicKeyBase64Url
+        )
+        let commit = PairCommitPayload(
+            deviceId: androidId.deviceId,
+            deviceName: "SM-A736B",
+            ephemeralPublicKey: androidSession.publicKeyBase64Url,
+            spkiSha256: androidId.certificateSha256Hex,
+            sasMacHex: macHex,
+            batteryLevel: 68,
+            isCharging: false,
+            pairToken: parsed.pairToken
+        )
+        let (macSavedPeer, ack) = try await pairing.handleIncomingPairCommit(commit)
+        #expect(macSavedPeer.deviceName == "SM-A736B")
+        #expect(try macTrust.allPeers().count == 1)
+        #expect(ack.accepted && ack.spkiSha256 == macId.certificateSha256Hex.lowercased())
+
+        // Android trusts Mac only after PAIR_ACK verifies
+        try androidTrust.savePeer(TrustedPeer(
+            deviceId: ack.deviceId,
+            deviceName: ack.deviceName,
+            pinnedCertSha256: ack.spkiSha256,
+            sharedBleSecret: derived.sharedBleSecret,
+            bluetoothSessionKey: derived.sessionKey
+        ))
+        #expect(try androidTrust.allPeers().first?.deviceId == macId.deviceId)
+
+        // 3. BLE-only resilient fallback with Wi-Fi unavailability backoff
+        actor RouteTracker {
+            var wifiAttempts = 0
+            var bleCount = 0
+            func incWifi() { wifiAttempts += 1 }
+            func incBle() { bleCount += 1 }
+        }
+        let rt = RouteTracker()
+        let mgr = TransportManager(cooldownDurationSeconds: 0.2)
+        await mgr.configureTransportHooks(
+            bleSender: { _ in await rt.incBle() },
+            wifiOpener: { return 49152 },
+            wifiSender: { _ in
+                await rt.incWifi()
+                throw WifiTlsError.connectionClosed
+            },
+            wifiCloser: {}
+        )
+        let bigPayload = Data(repeating: 0x5A, count: 800)
+        for seq in UInt64(1)...3 {
+            let f = try WireFrame(messageType: .fileChunk, sequenceId: seq, payload: bigPayload)
+            try await mgr.sendResilientFrame(f, preferBle: false)
+        }
+        // Only the 1st call attempts Wi-Fi before 8s backoff; subsequent calls go straight to BLE
+        #expect(await rt.wifiAttempts == 1)
+        #expect(await rt.bleCount == 3)
+
+        // 4. FILE_OFFER -> FILE_RESPONSE(accepted=true) -> adaptive 2048B FILE_CHUNK -> disk verification
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("linkme-v2-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let srcFile = tmpDir.appendingPathComponent("sample.bin")
+        let rxDir = tmpDir.appendingPathComponent("Downloads", isDirectory: true)
+        let payloadBytes = Data((0..<5000).map { UInt8(($0 * 7) & 0xFF) })
+        try payloadBytes.write(to: srcFile)
+
+        let senderFT = FileTransferManager(destinationRoot: rxDir)
+        let receiverFT = FileTransferManager(destinationRoot: rxDir)
+        let txUuid = UUID()
+
+        actor DiskReceiver {
+            var savedUrl: URL?
+            func setUrl(_ u: URL) { savedUrl = u }
+        }
+        let diskBox = DiskReceiver()
+
+        let offer = try await senderFT.streamOutboundFile(
+            fileURL: srcFile,
+            transferId: txUuid,
+            chunkSize: 2048,
+            awaitOfferAcceptance: true
+        ) { frame in
+            if frame.messageType == .fileOffer {
+                let decodedOffer = try JSONDecoder().decode(FileOfferPayload.self, from: frame.payload)
+                let resp = try await receiverFT.beginIncomingTransfer(offer: decodedOffer)
+                await senderFT.handleFileResponse(resp)
+            } else if frame.messageType == .fileChunk {
+                let pkt = try FileChunkPacket.decode(from: frame.payload)
+                let prog = try await receiverFT.receiveChunk(pkt)
+                if prog.bytesTransferred >= prog.totalBytes {
+                    let finalURL = try await receiverFT.finalizeIncomingTransfer(pkt.transferId)
+                    await diskBox.setUrl(finalURL)
+                }
+            }
+        }
+        #expect(offer.chunkSize == 2048)
+        #expect(offer.totalChunks == 3)
+        let saved = try #require(await diskBox.savedUrl)
+        #expect(try Data(contentsOf: saved) == payloadBytes)
+
+        // 5. Wake + StealthBlack ScreenControl & PIN entry RemoteInput codec round-trip
+        let wakeCtrl = ScreenControlPayload(action: "start", source: "android", fps: 60, quality: 65, wake: true, stealthBlack: true)
+        let decodedWake = try JSONDecoder().decode(ScreenControlPayload.self, from: JSONEncoder().encode(wakeCtrl))
+        #expect(decodedWake.wake && decodedWake.stealthBlack && decodedWake.fps == 60)
+
+        let pinInput = RemoteInputPayload.text("1234")
+        let decodedPin = try JSONDecoder().decode(RemoteInputPayload.self, from: JSONEncoder().encode(pinInput))
+        #expect(decodedPin == pinInput)
+    }
 }

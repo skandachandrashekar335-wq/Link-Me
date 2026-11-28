@@ -47,6 +47,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -57,6 +58,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -90,6 +92,8 @@ import com.linkme.androidbridge.core.protocol.PairCommitPayload
 import com.linkme.androidbridge.core.protocol.PairHelloPayload
 import com.linkme.androidbridge.core.protocol.PairingCommitMac
 import com.linkme.androidbridge.service.BridgeActivityHub
+import com.linkme.androidbridge.service.PairingCommitStatus
+import com.linkme.androidbridge.service.PendingPairingCandidate
 import com.linkme.androidbridge.service.TelemetryFeature
 import com.linkme.androidbridge.ui.theme.LocalBridgePalette
 import kotlinx.coroutines.Dispatchers
@@ -104,6 +108,7 @@ private data class ParsedPairingState(
     val pinnedCertSha256: String,
     val sharedBleSecret: ByteArray,
     val sessionKey: ByteArray,
+    val pairToken: String,
     val lanHost: String?,
     val tcpPort: Int,
     val localDeviceId: String,
@@ -114,6 +119,7 @@ private data class ParsedPairingState(
 
 /**
  * Live CameraX + MLKit QR pairing & 6-digit SAS verification screen matching Liquid Continuity design.
+ * Waits for bidirectional PAIR_ACK from macOS before trusting peer in TrustStore.
  */
 @Composable
 fun QrScannerScreen(
@@ -130,6 +136,7 @@ fun QrScannerScreen(
     val context = LocalContext.current
     val pal = LocalBridgePalette.current
     val scope = rememberCoroutineScope()
+    val pairingStatus by BridgeActivityHub.pairingStatus.collectAsState()
 
     var hasCameraPermission by remember {
         mutableStateOf(
@@ -144,6 +151,18 @@ fun QrScannerScreen(
     var qrDetectedBadge by remember { mutableStateOf(false) }
     var parsedPairing by remember { mutableStateOf<ParsedPairingState?>(null) }
     var cameraRef by remember { mutableStateOf<Camera?>(null) }
+
+    LaunchedEffect(pairingStatus) {
+        when (val st = pairingStatus) {
+            is PairingCommitStatus.Connected -> {
+                onCancel()
+            }
+            is PairingCommitStatus.Failed -> {
+                errorMessage = st.reason
+            }
+            else -> Unit
+        }
+    }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -203,6 +222,7 @@ fun QrScannerScreen(
                     pinnedCertSha256 = resolvedFp,
                     sharedBleSecret = derived.sharedBleSecret,
                     sessionKey = derived.sessionKey,
+                    pairToken = parsed.pairToken,
                     lanHost = parsed.lanHost,
                     tcpPort = parsed.tcpPort,
                     localDeviceId = localIdentity.deviceId,
@@ -565,13 +585,15 @@ fun QrScannerScreen(
                         color = pal.secondaryText
                     )
 
+                    val isWaitingForAck = pairingStatus is PairingCommitStatus.Connecting
                     Button(
                         onClick = {
                             if (active.pinnedCertSha256.length != 64 || !active.pinnedCertSha256.all { it in '0'..'9' || it in 'a'..'f' }) {
-                                errorMessage = "Full 64-hex TLS certificate pin required; scan a v1.1.0 MacBridge QR or enter pin below."
+                                errorMessage = "Full 64-hex TLS certificate pin required; scan a v2.0.0 MacBridge QR or enter pin below."
                                 showManualFallback = true
                                 return@Button
                             }
+                            errorMessage = null
                             val snap = TelemetryFeature(active.localDeviceId).readCurrentBattery(context)
                             val macHex = PairingCommitMac.computeHex(
                                 sharedBleSecret = active.sharedBleSecret,
@@ -587,33 +609,54 @@ fun QrScannerScreen(
                                 spkiSha256 = active.localSpkiSha256,
                                 sasMacHex = macHex,
                                 batteryLevel = snap.level ?: 0,
-                                isCharging = snap.isCharging
+                                isCharging = snap.isCharging,
+                                pairToken = active.pairToken
                             )
-                            onConfirmTrustedPeer(
-                                active.peerId,
-                                active.peerName,
-                                active.pinnedCertSha256,
-                                active.sharedBleSecret,
-                                active.sessionKey
-                            ) {
-                                BridgeActivityHub.onSendPairCommit?.invoke(commit, active.lanHost, active.tcpPort)
-                            }
+                            // Never trust locally until PAIR_ACK arrives back from Mac
+                            BridgeActivityHub.beginPairingCommit(
+                                PendingPairingCandidate(
+                                    peerId = active.peerId,
+                                    peerName = active.peerName,
+                                    pinnedCertSha256 = active.pinnedCertSha256,
+                                    sharedBleSecret = active.sharedBleSecret,
+                                    bluetoothSessionKey = active.sessionKey,
+                                    pairToken = active.pairToken
+                                )
+                            )
+                            BridgeActivityHub.onSendPairCommit?.invoke(commit, active.lanHost, active.tcpPort)
                         },
+                        enabled = !isWaitingForAck,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(48.dp),
                         shape = CircleShape,
                         colors = ButtonDefaults.buttonColors(containerColor = pal.primaryAccent)
                     ) {
-                        Icon(Icons.Rounded.CheckCircle, contentDescription = null, tint = Color.White)
-                        Spacer(modifier = Modifier.size(8.dp))
-                        Text("Confirm & Trust", color = Color.White, fontWeight = FontWeight.SemiBold)
+                        if (isWaitingForAck) {
+                            CircularProgressIndicator(
+                                color = Color.White,
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.size(10.dp))
+                            Text("Connecting to ${active.peerName}...", color = Color.White, fontWeight = FontWeight.SemiBold)
+                        } else {
+                            Icon(Icons.Rounded.CheckCircle, contentDescription = null, tint = Color.White)
+                            Spacer(modifier = Modifier.size(8.dp))
+                            Text(
+                                if (pairingStatus is PairingCommitStatus.Failed) "Retry Confirm & Trust" else "Confirm & Trust",
+                                color = Color.White,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
 
                     OutlinedButton(
                         onClick = {
+                            BridgeActivityHub.resetPairingStatus()
                             parsedPairing = null
                             qrDetectedBadge = false
+                            errorMessage = null
                             onCancel()
                         },
                         modifier = Modifier

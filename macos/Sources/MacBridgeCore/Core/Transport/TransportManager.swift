@@ -35,6 +35,7 @@ public actor TransportManager: FrameTransportSink {
     private var cooldownTask: Task<Void, Never>?
     private var activeStreams: Int = 0
     private var isWifiSocketOpen: Bool = false
+    private var wifiUnavailableUntil: Date? = nil
 
     private var bleSender: (@Sendable (WireFrame) async throws -> Void)?
     private var wifiOpener: (@Sendable () async throws -> UInt16)?
@@ -127,7 +128,12 @@ public actor TransportManager: FrameTransportSink {
         let priority: TransferPriority = (preferBleIfSmall && frame.payload.count <= Self.bleControlThresholdBytes)
             ? .lowLatencyControl
             : .highThroughput
-        try await routeFrame(frame, priority: priority, deviceId: "11111111-1111-4111-8111-111111111111", fallbackToBleOnWifiError: false)
+        try await routeFrame(
+            frame,
+            priority: priority,
+            deviceId: "11111111-1111-4111-8111-111111111111",
+            fallbackToBleOnWifiError: preferBleIfSmall
+        )
     }
 
     /// Dual-mode resilient send: attempts Wi-Fi mTLS when LAN is available, and seamlessly falls back
@@ -157,6 +163,16 @@ public actor TransportManager: FrameTransportSink {
                 return
             }
             throw TransportError.bleOnlyBatterySaverBlocked
+        }
+
+        // If Wi-Fi was recently unreachable on this subnet pair, route instantaneously over BLE without 1.8s stall
+        if fallbackToBleOnWifiError,
+           !isWifiSocketOpen,
+           let backoffUntil = wifiUnavailableUntil,
+           Date() < backoffUntil {
+            try await bleSender?(frame)
+            await outboundRecorder?(frame, .bleStandby)
+            return
         }
 
         // High-throughput or > 400B payload: try Wi-Fi mTLS 1.3, fall back cleanly to Bluetooth if LAN unavailable
@@ -226,13 +242,24 @@ public actor TransportManager: FrameTransportSink {
             }
 
             try await wifiSender?(frame)
+            wifiUnavailableUntil = nil
             await outboundRecorder?(frame, .wifiTurbo)
         } catch {
             guard fallbackToBleOnWifiError else { throw error }
             isWifiSocketOpen = false
+            wifiUnavailableUntil = Date().addingTimeInterval(8.0)
             _ = transition(.cooldownExpired)
             try await bleSender?(frame)
             await outboundRecorder?(frame, .bleStandby)
+        }
+    }
+
+    public func markWifiUpgradeReady() {
+        wifiUnavailableUntil = nil
+        isWifiSocketOpen = true
+        if bridgeState != .activeWifiStream {
+            _ = transition(.localActivityTriggered)
+            _ = transition(.mtlsHandshakeSucceeded)
         }
     }
 

@@ -30,6 +30,8 @@ public actor FileTransferManager {
     private let destinationRoot: URL
     private var cancelledTransfers: Set<UUID> = []
     private var activeReceives: [UUID: ActiveReceiveState] = [:]
+    private var responseWaiters: [String: CheckedContinuation<Bool, Never>] = [:]
+    private var completedResponses: [String: Bool] = [:]
 
     private struct ActiveReceiveState {
         let offer: FileOfferPayload
@@ -48,9 +50,42 @@ public actor FileTransferManager {
 
     public func cancelTransfer(_ transferId: UUID) {
         cancelledTransfers.insert(transferId)
+        let key = transferId.uuidString.lowercased()
+        if let cont = responseWaiters.removeValue(forKey: key) {
+            cont.resume(returning: false)
+        }
         if let active = activeReceives.removeValue(forKey: transferId) {
             try? active.handle.close()
             try? FileManager.default.removeItem(at: active.partURL)
+        }
+    }
+
+    public func handleFileResponse(_ response: FileResponsePayload) {
+        let key = response.transferId.lowercased()
+        if let cont = responseWaiters.removeValue(forKey: key) {
+            cont.resume(returning: response.accepted)
+        } else {
+            completedResponses[key] = response.accepted
+        }
+    }
+
+    public func waitForAcceptance(transferId: UUID, timeoutSeconds: TimeInterval = 5.0) async -> Bool {
+        let key = transferId.uuidString.lowercased()
+        if let pre = completedResponses.removeValue(forKey: key) {
+            return pre
+        }
+        return await withCheckedContinuation { continuation in
+            responseWaiters[key] = continuation
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(timeoutSeconds))
+                await self?.resolveTimedOutResponse(key: key)
+            }
+        }
+    }
+
+    private func resolveTimedOutResponse(key: String) {
+        if let cont = responseWaiters.removeValue(forKey: key) {
+            cont.resume(returning: false)
         }
     }
 
@@ -58,6 +93,8 @@ public actor FileTransferManager {
         fileURL: URL,
         transferId: UUID = UUID(),
         mimeType: String = "application/octet-stream",
+        chunkSize: Int = FileTransferManager.chunkSize,
+        awaitOfferAcceptance: Bool = false,
         onProgress: (@Sendable (FileTransferProgress) async -> Void)? = nil,
         emitFrame: @Sendable (WireFrame) async throws -> Void
     ) async throws -> FileOfferPayload {
@@ -67,9 +104,10 @@ public actor FileTransferManager {
             throw FileTransferError.fileEmptyOrMissing
         }
 
+        let effChunkSize = min(Self.chunkSize, max(512, chunkSize))
         // Pass 1: streaming SHA-256 without loading entire file into RAM
         let fileDigest = try Self.streamingSha256Hex(fileURL: fileURL)
-        let totalChunks = UInt32((totalBytes + UInt64(Self.chunkSize) - 1) / UInt64(Self.chunkSize))
+        let totalChunks = UInt32((totalBytes + UInt64(effChunkSize) - 1) / UInt64(effChunkSize))
         let safeFilename = FilenameSanitizer.sanitize(fileURL.lastPathComponent)
 
         let offer = FileOfferPayload(
@@ -77,7 +115,7 @@ public actor FileTransferManager {
             filename: safeFilename,
             byteSize: totalBytes,
             sha256: fileDigest,
-            chunkSize: UInt32(Self.chunkSize),
+            chunkSize: UInt32(effChunkSize),
             totalChunks: totalChunks,
             mimeType: mimeType
         )
@@ -85,7 +123,14 @@ public actor FileTransferManager {
         var seq: UInt64 = 1
         try await emitFrame(WireFrame(messageType: .fileOffer, sequenceId: seq, payload: offerData))
 
-        // Pass 2: stream 64 KB chunks
+        if awaitOfferAcceptance {
+            let accepted = await waitForAcceptance(transferId: transferId, timeoutSeconds: 6.0)
+            guard accepted else {
+                throw FileTransferError.cancelled
+            }
+        }
+
+        // Pass 2: stream chunks sequentially with sliding-window progress
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer { try? handle.close() }
 
@@ -97,7 +142,7 @@ public actor FileTransferManager {
             if cancelledTransfers.contains(transferId) {
                 throw FileTransferError.cancelled
             }
-            let chunkData = try handle.read(upToCount: Self.chunkSize) ?? Data()
+            let chunkData = try handle.read(upToCount: effChunkSize) ?? Data()
             if chunkData.isEmpty { break }
 
             let chunkSha = Data(SHA256.hash(data: chunkData))

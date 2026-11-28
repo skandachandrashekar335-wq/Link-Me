@@ -172,7 +172,7 @@ class ScreenMirrorService : Service() {
                 }
                 val now = System.currentTimeMillis()
                 val bleOnly = !BridgeActivityHub.wifiConnected.value
-                val effFps = if (bleOnly) minOf(3, targetFps) else targetFps
+                val effFps = if (bleOnly) targetFps.coerceIn(1, 15) else targetFps.coerceIn(1, 60)
                 val effQuality = if (bleOnly) minOf(48, jpegQuality) else jpegQuality
                 val minInterval = 1000L / effFps.coerceAtLeast(1)
                 if (now - lastSentAtMs < minInterval || !isEncoding.compareAndSet(false, true)) {

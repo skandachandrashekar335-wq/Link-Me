@@ -17,6 +17,7 @@ public struct PairingUriPayload: Sendable, Equatable {
     public let publicKeyBase64Url: String
     public let certSha256Prefix: String
     public let nonceHex: String
+    public let pairToken: String
     public let tcpPort: UInt16
     public let bleServiceUuid: String?
     public let lanHost: String?
@@ -28,6 +29,7 @@ public struct PairingUriPayload: Sendable, Equatable {
         publicKeyBase64Url: String,
         certSha256Prefix: String,
         nonceHex: String,
+        pairToken: String? = nil,
         tcpPort: UInt16,
         bleServiceUuid: String? = PairingUriPayload.defaultBleServiceUuid,
         lanHost: String? = nil,
@@ -38,6 +40,7 @@ public struct PairingUriPayload: Sendable, Equatable {
         self.publicKeyBase64Url = publicKeyBase64Url
         self.certSha256Prefix = certSha256Prefix.lowercased()
         self.nonceHex = nonceHex
+        self.pairToken = pairToken ?? String(nonceHex.prefix(16)).lowercased()
         self.tcpPort = tcpPort
         self.bleServiceUuid = bleServiceUuid
         self.lanHost = lanHost
@@ -56,21 +59,24 @@ public struct PairingUriPayload: Sendable, Equatable {
             URLQueryItem(name: "v", value: String(version)),
             URLQueryItem(name: "id", value: deviceId),
             URLQueryItem(name: "pub", value: publicKeyBase64Url),
+            URLQueryItem(name: "pk", value: publicKeyBase64Url),
             URLQueryItem(name: "fp", value: certSha256Prefix),
             URLQueryItem(name: "nonce", value: nonceHex),
-            URLQueryItem(name: "port", value: String(tcpPort))
+            URLQueryItem(name: "tok", value: pairToken),
+            URLQueryItem(name: "ble", value: (bleServiceUuid?.isEmpty == false ? bleServiceUuid! : Self.defaultBleServiceUuid))
         ]
-        if let ble = bleServiceUuid, !ble.isEmpty {
-            queryItems.append(URLQueryItem(name: "ble", value: ble))
-        }
-        if let host = lanHost, !host.isEmpty {
+        if let host = lanHost, !host.isEmpty, tcpPort > 0 {
+            queryItems.append(URLQueryItem(name: "ip", value: host))
             queryItems.append(URLQueryItem(name: "host", value: host))
+            queryItems.append(URLQueryItem(name: "port", value: String(tcpPort)))
+        } else if tcpPort > 0 {
+            queryItems.append(URLQueryItem(name: "port", value: String(tcpPort)))
         }
         if let name = deviceName, !name.isEmpty {
             queryItems.append(URLQueryItem(name: "name", value: name))
         }
         components.queryItems = queryItems
-        return components.string ?? "linkme://pair?v=\(version)&id=\(deviceId)&pub=\(publicKeyBase64Url)&fp=\(certSha256Prefix)&nonce=\(nonceHex)&port=\(tcpPort)"
+        return components.string ?? "linkme://pair?v=\(version)&id=\(deviceId)&pk=\(publicKeyBase64Url)&fp=\(certSha256Prefix)&nonce=\(nonceHex)&tok=\(pairToken)&ble=1"
     }
 
     public static func parse(_ uri: String) throws -> PairingUriPayload {
@@ -84,23 +90,34 @@ public struct PairingUriPayload: Sendable, Equatable {
         let dict = Dictionary(items.compactMap { item in
             item.value.map { (item.name, $0) }
         }, uniquingKeysWith: { _, latest in latest })
-        guard let vStr = dict["v"], let version = Int(vStr), version == 1,
+        guard let vStr = dict["v"], let version = Int(vStr), (version == 1 || version == 2),
               let deviceId = dict["id"], !deviceId.isEmpty,
-              let pub = dict["pub"], !pub.isEmpty,
+              let pub = dict["pk"] ?? dict["pub"], !pub.isEmpty,
               let fp = dict["fp"], fp.count >= 16,
-              let nonce = dict["nonce"], nonce.count == 32, Data(hexString: nonce) != nil,
-              let portStr = dict["port"], let port = UInt16(portStr) else {
+              let nonce = dict["nonce"], nonce.count == 32, Data(hexString: nonce) != nil else {
             throw PairingCryptoError.invalidUri
         }
+        let port: UInt16
+        if let portStr = dict["port"] {
+            guard let parsedPort = UInt16(portStr) else { throw PairingCryptoError.invalidUri }
+            port = parsedPort
+        } else if version >= 2 {
+            port = 0
+        } else {
+            throw PairingCryptoError.invalidUri
+        }
+        let bleRaw = dict["ble"]
+        let bleUuid = (bleRaw == "1" || bleRaw == nil || bleRaw?.isEmpty == true) ? defaultBleServiceUuid : bleRaw
         return PairingUriPayload(
             version: version,
             deviceId: deviceId,
             publicKeyBase64Url: pub,
             certSha256Prefix: fp,
             nonceHex: nonce,
+            pairToken: dict["tok"],
             tcpPort: port,
-            bleServiceUuid: dict["ble"] ?? defaultBleServiceUuid,
-            lanHost: dict["host"],
+            bleServiceUuid: bleUuid,
+            lanHost: dict["ip"] ?? dict["host"],
             deviceName: dict["name"]
         )
     }
@@ -157,6 +174,11 @@ public struct PairingCrypto: @unchecked Sendable {
         date.timeIntervalSince(createdAt) > Self.sessionTtlSeconds
     }
 
+    public var pairToken: String {
+        let digest = SHA256.hash(data: nonce + privateKey.publicKey.rawRepresentation)
+        return Data(digest.prefix(8)).hexString
+    }
+
     public func makePairingUri(
         deviceId: String,
         certSha256Hex: String,
@@ -166,11 +188,12 @@ public struct PairingCrypto: @unchecked Sendable {
         deviceName: String? = nil
     ) -> PairingUriPayload {
         PairingUriPayload(
-            version: 1,
+            version: 2,
             deviceId: deviceId,
             publicKeyBase64Url: publicKeyBase64Url,
             certSha256Prefix: certSha256Hex.lowercased(),
             nonceHex: nonce.hexString,
+            pairToken: pairToken,
             tcpPort: tcpPort,
             bleServiceUuid: bleServiceUuid,
             lanHost: lanHost,

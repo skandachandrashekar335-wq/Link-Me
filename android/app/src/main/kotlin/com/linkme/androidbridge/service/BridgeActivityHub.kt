@@ -3,6 +3,7 @@ package com.linkme.androidbridge.service
 import com.linkme.androidbridge.core.protocol.DeviceCommandPayload
 import com.linkme.androidbridge.core.protocol.FileOfferPayload
 import com.linkme.androidbridge.core.protocol.MediaControlAction
+import com.linkme.androidbridge.core.protocol.PairAckPayload
 import com.linkme.androidbridge.core.protocol.PairCommitPayload
 import com.linkme.androidbridge.core.protocol.PairHelloPayload
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -10,6 +11,27 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
+
+data class PendingPairingCandidate(
+    val peerId: String,
+    val peerName: String,
+    val pinnedCertSha256: String,
+    val sharedBleSecret: ByteArray,
+    val bluetoothSessionKey: ByteArray,
+    val pairToken: String
+)
+
+sealed class PairingCommitStatus {
+    data object Idle : PairingCommitStatus()
+    data class Connecting(val macName: String) : PairingCommitStatus()
+    data class Connected(
+        val peerId: String,
+        val peerName: String,
+        val pinnedCertSha256: String,
+        val ack: PairAckPayload
+    ) : PairingCommitStatus()
+    data class Failed(val reason: String) : PairingCommitStatus()
+}
 
 enum class ActivityCategory {
     FILES,
@@ -91,6 +113,12 @@ object BridgeActivityHub {
 
     private val _mirrorState = MutableStateFlow(ScreenMirrorUiState())
     val mirrorState: StateFlow<ScreenMirrorUiState> = _mirrorState.asStateFlow()
+
+    private val _pairingStatus = MutableStateFlow<PairingCommitStatus>(PairingCommitStatus.Idle)
+    val pairingStatus: StateFlow<PairingCommitStatus> = _pairingStatus.asStateFlow()
+
+    @Volatile
+    var pendingPairingCandidate: PendingPairingCandidate? = null
 
     private val pendingFileUris = ConcurrentLinkedQueue<String>()
 
@@ -182,5 +210,41 @@ object BridgeActivityHub {
         val current = _pendingFileOffer.value ?: return
         _pendingFileOffer.value = null
         onResolvePendingFileOffer?.invoke(current, accepted)
+    }
+
+    fun setStealthBlack(active: Boolean) {
+        _stealthBlackActive.value = active
+    }
+
+    fun beginPairingCommit(candidate: PendingPairingCandidate) {
+        pendingPairingCandidate = candidate
+        _pairingStatus.value = PairingCommitStatus.Connecting(candidate.peerName)
+    }
+
+    fun completePairingSuccess(candidate: PendingPairingCandidate, ack: PairAckPayload) {
+        pendingPairingCandidate = null
+        _pairingStatus.value = PairingCommitStatus.Connected(
+            peerId = candidate.peerId,
+            peerName = ack.deviceName.ifBlank { candidate.peerName },
+            pinnedCertSha256 = candidate.pinnedCertSha256,
+            ack = ack
+        )
+        updatePeerTelemetry(
+            percent = ack.batteryLevel,
+            charging = ack.isCharging,
+            name = ack.deviceName.ifBlank { candidate.peerName }
+        )
+    }
+
+    fun failPairingIfWaiting(reason: String) {
+        if (_pairingStatus.value is PairingCommitStatus.Connecting) {
+            pendingPairingCandidate = null
+            _pairingStatus.value = PairingCommitStatus.Failed(reason)
+        }
+    }
+
+    fun resetPairingStatus() {
+        pendingPairingCandidate = null
+        _pairingStatus.value = PairingCommitStatus.Idle
     }
 }

@@ -36,12 +36,16 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Connects as a BLE GATT Client + L2CAP CoC client to MacBridge's Peripheral Service
- * (`414D0001-...`), supports QR pairing PAIR_HELLO transmission over Bluetooth with ZERO Wi-Fi,
- * persistent autoConnect reconnection, and 5-second RTT latency measurement.
+ * Serialized BLE GATT Client + L2CAP CoC client connecting to MacBridge (`414D0001-...`).
+ * Enforces:
+ * 1. `requestMtu(512)` -> `onMtuChanged` -> `discoverServices()` -> CCCD -> PSM read -> Ready.
+ * 2. All outbound GATT characteristic writes strictly serialized via a single writer queue
+ *    awaiting `onCharacteristicWrite` (2000ms watchdog timeout) so Samsung/Android stacks never drop packets.
+ * 3. `SCAN_MODE_LOW_LATENCY` with unfiltered UUID scan-record fallback if hardware filtering misses Mac.
  */
 class BleGattClient(
     private val context: Context,
@@ -51,6 +55,7 @@ class BleGattClient(
     private val onLatencyMeasured: ((Int) -> Unit)? = null
 ) {
     private val scheduler = Executors.newSingleThreadScheduledExecutor()
+    private val writeExecutor = Executors.newSingleThreadExecutor()
     private val l2capExecutor = Executors.newCachedThreadPool()
     private val reassembler = BluetoothPacketReassembler()
     private val replayGuard = ReplayGuard()
@@ -58,6 +63,12 @@ class BleGattClient(
     private val json = Json { ignoreUnknownKeys = true }
     private val pendingHandshakeQueue = ConcurrentLinkedQueue<WireFrame>()
     private val ackWaiters = ConcurrentHashMap<Long, CountDownLatch>()
+
+    @Volatile private var activeWriteLatch: CountDownLatch? = null
+    @Volatile private var activeWriteStatus: Int = BluetoothGatt.GATT_FAILURE
+    private val servicesDiscovered = AtomicBoolean(false)
+    private var scanFallbackFuture: ScheduledFuture<*>? = null
+    private var mtuFallbackFuture: ScheduledFuture<*>? = null
 
     private var scanCallback: ScanCallback? = null
     private var gatt: BluetoothGatt? = null
@@ -75,16 +86,27 @@ class BleGattClient(
     var isConnected: Boolean = false
         private set
 
+    @Volatile
+    var isGattReady: Boolean = false
+        private set
+
+    val currentNegotiatedMtu: Int
+        get() = negotiatedMtu
+
     @SuppressLint("MissingPermission")
     fun sendPairingHelloOverBle(pairHelloFrame: WireFrame) = sendPairingFrameOverBle(pairHelloFrame)
 
     @SuppressLint("MissingPermission")
     fun sendPairingFrameOverBle(frame: WireFrame) {
-        if (isConnected && rxWriteChar != null) {
+        if (isConnected && isGattReady && rxWriteChar != null) {
             if (sendFrame(frame)) return
         }
         pendingHandshakeQueue.offer(frame)
-        startScanning(autoReconnect = false)
+        if (!isConnected) {
+            startScanning(autoReconnect = false)
+        } else if (isGattReady && rxWriteChar != null) {
+            scheduler.execute { flushPendingHandshake() }
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -97,21 +119,48 @@ class BleGattClient(
             .setServiceUuid(ParcelUuid(BlePeripheralManager.SERVICE_UUID))
             .build()
         val settings = ScanSettings.Builder()
-            .setScanMode(if (autoReconnect) ScanSettings.SCAN_MODE_LOW_POWER else ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
         val cb = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
+                val uuids = result.scanRecord?.serviceUuids.orEmpty()
+                val matchesUuid = uuids.any { it.uuid == BlePeripheralManager.SERVICE_UUID }
+                if (!matchesUuid) return
                 stopScanning()
                 connectToDevice(result.device, autoConnect = autoReconnect)
             }
         }
         scanCallback = cb
         scanner.startScan(listOf(filter), settings, cb)
+
+        // Fallback unfiltered scan in case OEM controller misses 128-bit UUID hardware filter
+        scanFallbackFuture = scheduler.schedule(
+            {
+                if (!isConnected && scanCallback === cb) {
+                    runCatching { scanner.stopScan(cb) }
+                    val fallbackCb = object : ScanCallback() {
+                        override fun onScanResult(callbackType: Int, result: ScanResult) {
+                            val uuids = result.scanRecord?.serviceUuids.orEmpty()
+                            if (uuids.any { it.uuid == BlePeripheralManager.SERVICE_UUID }) {
+                                stopScanning()
+                                connectToDevice(result.device, autoConnect = autoReconnect)
+                            }
+                        }
+                    }
+                    scanCallback = fallbackCb
+                    runCatching { scanner.startScan(null, settings, fallbackCb) }
+                }
+            },
+            2500L,
+            TimeUnit.MILLISECONDS
+        )
     }
 
     @SuppressLint("MissingPermission")
     fun stopScanning() {
+        scanFallbackFuture?.cancel(false)
+        scanFallbackFuture = null
         val manager = context.getSystemService(BluetoothManager::class.java) ?: return
         scanCallback?.let { cb ->
             runCatching { manager.adapter?.bluetoothLeScanner?.stopScan(cb) }
@@ -121,6 +170,8 @@ class BleGattClient(
 
     @SuppressLint("MissingPermission")
     fun connectToDevice(device: BluetoothDevice, autoConnect: Boolean = true) {
+        isGattReady = false
+        servicesDiscovered.set(false)
         gatt?.close()
         gatt = device.connectGatt(context, autoConnect, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
@@ -156,35 +207,39 @@ class BleGattClient(
         val char = rxWriteChar ?: return false
         val pid = packetSeq.getAndIncrement()
         val packets = BluetoothPacketCodec.packetize(envelope, pid, negotiatedMtu)
-        val latch = if (packets.size > 1) CountDownLatch(1).also { ackWaiters[pid] = it } else null
-        for ((index, pkt) in packets.withIndex()) {
-            val withResponse = packets.size > 2 && (index % 8 == 7 || index == packets.lastIndex)
-            writeCharacteristicBytes(client, char, pkt, withResponse = withResponse)
-            if (packets.size > 1) {
-                runCatching { Thread.sleep(6L) }
+
+        // Dispatch strictly serialized via single writer executor awaiting onCharacteristicWrite
+        val job = writeExecutor.submit<Boolean> {
+            val ackLatch = if (packets.size > 1) CountDownLatch(1).also { ackWaiters[pid] = it } else null
+            var allOk = true
+            for (pkt in packets) {
+                if (!writePacketAndAwaitCallback(client, char, pkt)) {
+                    allOk = false
+                    break
+                }
             }
-        }
-        latch?.let {
-            runCatching { it.await(1500L, TimeUnit.MILLISECONDS) }
+            if (allOk && ackLatch != null) {
+                runCatching { ackLatch.await(1500L, TimeUnit.MILLISECONDS) }
+            }
             ackWaiters.remove(pid)
+            allOk
         }
-        return true
+        return runCatching { job.get(30L, TimeUnit.SECONDS) }.getOrDefault(false)
     }
 
     @SuppressLint("MissingPermission")
-    private fun writeCharacteristicBytes(
+    private fun writePacketAndAwaitCallback(
         client: BluetoothGatt,
         char: BluetoothGattCharacteristic,
-        data: ByteArray,
-        withResponse: Boolean = false
-    ) {
-        val writeType = if (withResponse) {
-            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-        } else {
-            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            client.writeCharacteristic(char, data, writeType)
+        data: ByteArray
+    ): Boolean {
+        val writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        val latch = CountDownLatch(1)
+        activeWriteStatus = BluetoothGatt.GATT_FAILURE
+        activeWriteLatch = latch
+
+        val queued = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            client.writeCharacteristic(char, data, writeType) == 0
         } else {
             @Suppress("DEPRECATION")
             char.writeType = writeType
@@ -193,6 +248,13 @@ class BleGattClient(
             @Suppress("DEPRECATION")
             client.writeCharacteristic(char)
         }
+        if (!queued) {
+            activeWriteLatch = null
+            return false
+        }
+        val completed = runCatching { latch.await(2000L, TimeUnit.MILLISECONDS) }.getOrDefault(false)
+        activeWriteLatch = null
+        return completed && activeWriteStatus == BluetoothGatt.GATT_SUCCESS
     }
 
     private fun flushPendingHandshake() {
@@ -210,7 +272,7 @@ class BleGattClient(
         heartbeatFuture?.cancel(false)
         heartbeatFuture = scheduler.scheduleAtFixedRate(
             {
-                if (!isConnected) return@scheduleAtFixedRate
+                if (!isConnected || !isGattReady) return@scheduleAtFixedRate
                 val nowMs = System.currentTimeMillis()
                 lastPingSentMs = nowMs
                 val cmd = DeviceCommandPayload(command = "btPing", timestampMs = nowMs)
@@ -226,25 +288,53 @@ class BleGattClient(
     private val gattCallback = object : BluetoothGattCallback() {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
+            if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
                 isConnected = true
+                isGattReady = false
+                servicesDiscovered.set(false)
                 onConnectionChanged?.invoke(true)
-                gatt.requestMtu(512)
-                gatt.discoverServices()
-                startHeartbeat()
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+
+                // Negotiate MTU=512 BEFORE discovering services
+                val mtuRequested = runCatching { gatt.requestMtu(512) }.getOrDefault(false)
+                mtuFallbackFuture?.cancel(false)
+                if (!mtuRequested) {
+                    if (servicesDiscovered.compareAndSet(false, true)) {
+                        gatt.discoverServices()
+                    }
+                } else {
+                    mtuFallbackFuture = scheduler.schedule(
+                        {
+                            if (isConnected && servicesDiscovered.compareAndSet(false, true)) {
+                                gatt.discoverServices()
+                            }
+                        },
+                        1200L,
+                        TimeUnit.MILLISECONDS
+                    )
+                }
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
+                mtuFallbackFuture?.cancel(false)
                 isConnected = false
+                isGattReady = false
+                servicesDiscovered.set(false)
                 rxWriteChar = null
                 txNotifyChar = null
                 l2capPsmChar = null
+                activeWriteLatch?.countDown()
+                activeWriteLatch = null
                 reassembler.reset()
                 heartbeatFuture?.cancel(false)
                 onConnectionChanged?.invoke(false)
             }
         }
 
+        @SuppressLint("MissingPermission")
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            mtuFallbackFuture?.cancel(false)
             negotiatedMtu = mtu.coerceIn(23, 512)
+            if (servicesDiscovered.compareAndSet(false, true)) {
+                gatt.discoverServices()
+            }
         }
 
         @SuppressLint("MissingPermission")
@@ -268,12 +358,10 @@ class BleGattClient(
                         @Suppress("DEPRECATION")
                         gatt.writeDescriptor(cccd)
                     }
-                    if (queued) {
-                        return
-                    }
+                    if (queued) return
                 }
             }
-            readPsmOrFlush(gatt)
+            readPsmOrMarkReady(gatt)
         }
 
         override fun onDescriptorWrite(
@@ -281,19 +369,21 @@ class BleGattClient(
             descriptor: BluetoothGattDescriptor,
             status: Int
         ) {
-            readPsmOrFlush(gatt)
+            readPsmOrMarkReady(gatt)
         }
 
         @SuppressLint("MissingPermission")
-        private fun readPsmOrFlush(gatt: BluetoothGatt) {
+        private fun readPsmOrMarkReady(gatt: BluetoothGatt) {
             val psmChar = l2capPsmChar
             if (psmChar != null && gatt.readCharacteristic(psmChar)) {
                 return
             }
-            flushPendingHandshakeAsync()
+            markReadyAndFlush()
         }
 
-        private fun flushPendingHandshakeAsync() {
+        private fun markReadyAndFlush() {
+            isGattReady = true
+            startHeartbeat()
             scheduler.execute { flushPendingHandshake() }
         }
 
@@ -307,7 +397,7 @@ class BleGattClient(
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 handlePsmRead(gatt.device, characteristic, value)
             }
-            flushPendingHandshakeAsync()
+            markReadyAndFlush()
         }
 
         @Suppress("DEPRECATION")
@@ -320,7 +410,16 @@ class BleGattClient(
             if (status == BluetoothGatt.GATT_SUCCESS && bytes != null) {
                 handlePsmRead(gatt.device, characteristic, bytes)
             }
-            flushPendingHandshakeAsync()
+            markReadyAndFlush()
+        }
+
+        override fun onCharacteristicWrite(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            activeWriteStatus = status
+            activeWriteLatch?.countDown()
         }
 
         @SuppressLint("MissingPermission")
@@ -412,11 +511,14 @@ class BleGattClient(
     @SuppressLint("MissingPermission")
     fun shutdown() {
         stopScanning()
+        mtuFallbackFuture?.cancel(false)
         heartbeatFuture?.cancel(false)
+        activeWriteLatch?.countDown()
         runCatching { l2capSocket?.close() }
         runCatching { gatt?.close() }
         l2capSocket = null
         gatt = null
+        writeExecutor.shutdownNow()
         scheduler.shutdownNow()
         l2capExecutor.shutdownNow()
     }

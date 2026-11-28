@@ -59,6 +59,9 @@ class TransportManager(
     var isWifiSocketOpen: Boolean = false
         private set
 
+    @Volatile
+    private var wifiUnavailableUntilMs: Long = 0L
+
     val bridgeState: BridgeState
         @Synchronized get() = stateMachine.state
 
@@ -86,7 +89,12 @@ class TransportManager(
         } else {
             TransferPriority.HIGH_THROUGHPUT
         }
-        routeFrame(frame, priority, "22222222-2222-4222-8222-222222222222", fallbackToBleOnWifiError = false)
+        routeFrame(
+            frame,
+            priority,
+            "22222222-2222-4222-8222-222222222222",
+            fallbackToBleOnWifiError = preferBleIfSmall
+        )
     }
 
     fun sendResilientFrame(frame: WireFrame, preferBle: Boolean = false) {
@@ -138,6 +146,13 @@ class TransportManager(
             throw IllegalStateException("BLE_ONLY_BATTERY_SAVER_ACTIVE")
         }
 
+        // Route directly via BLE if Wi-Fi failed recently (avoids 1.8s TCP stall per chunk across different Wi-Fi)
+        if (fallbackToBleOnWifiError && !isWifiSocketOpen && System.currentTimeMillis() < wifiUnavailableUntilMs) {
+            bleSender?.invoke(frame)
+            outboundSink?.invoke(frame, TransportChannel.BLE_STANDBY)
+            return
+        }
+
         cooldownFuture?.cancel(false)
         cooldownFuture = null
 
@@ -174,6 +189,7 @@ class TransportManager(
             activeStreams.incrementAndGet()
             try {
                 wifiSender?.invoke(frame)
+                wifiUnavailableUntilMs = 0L
                 outboundSink?.invoke(frame, TransportChannel.WIFI_TURBO)
             } finally {
                 if (activeStreams.decrementAndGet() <= 0) {
@@ -184,9 +200,20 @@ class TransportManager(
         } catch (err: Throwable) {
             if (!fallbackToBleOnWifiError) throw err
             isWifiSocketOpen = false
+            wifiUnavailableUntilMs = System.currentTimeMillis() + 8_000L
             transition(BatteryStateEvent.COOLDOWN_EXPIRED)
             bleSender?.invoke(frame)
             outboundSink?.invoke(frame, TransportChannel.BLE_STANDBY)
+        }
+    }
+
+    @Synchronized
+    fun markWifiUpgradeReady() {
+        wifiUnavailableUntilMs = 0L
+        isWifiSocketOpen = true
+        if (stateMachine.state != BridgeState.ACTIVE_WIFI_STREAM) {
+            transition(BatteryStateEvent.LOCAL_ACTIVITY_TRIGGERED)
+            transition(BatteryStateEvent.MTLS_HANDSHAKE_SUCCEEDED)
         }
     }
 

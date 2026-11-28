@@ -392,28 +392,42 @@ class BridgeForegroundService : Service() {
                 serviceScope.launch {
                     val payloadBytes = json.encodeToString(commit).toByteArray(Charsets.UTF_8)
                     val commitFrame = WireFrame(WireMessageType.PAIR_COMMIT, 2L, payloadBytes)
-                    gattClient.sendPairingFrameOverBle(commitFrame)
+
+                    // Race BLE GATT and Wi-Fi TCP (1500ms timeout) in parallel
+                    serviceScope.launch {
+                        runCatching { gattClient.sendPairingFrameOverBle(commitFrame) }
+                    }
                     if (!lanHost.isNullOrBlank() && tcpPort > 0) {
-                        runCatching {
-                            Socket().use { sock ->
-                                sock.soTimeout = 3500
-                                sock.connect(InetSocketAddress(lanHost, tcpPort), 2500)
-                                val out = sock.getOutputStream()
-                                out.write(FrameEncoder.encode(commitFrame))
-                                out.flush()
-                                val buf = ByteArray(16_384)
-                                val read = runCatching { sock.getInputStream().read(buf) }.getOrDefault(-1)
-                                if (read > 0) {
-                                    val decoder = com.linkme.androidbridge.core.protocol.FrameDecoder()
-                                    decoder.append(buf.copyOf(read))
-                                    for (replyFrame in decoder.drainFrames()) {
-                                        routeInboundFrame(replyFrame)
+                        serviceScope.launch {
+                            runCatching {
+                                Socket().use { sock ->
+                                    sock.soTimeout = 4000
+                                    sock.connect(InetSocketAddress(lanHost, tcpPort), 1500)
+                                    val out = sock.getOutputStream()
+                                    out.write(FrameEncoder.encode(commitFrame))
+                                    out.flush()
+                                    val buf = ByteArray(16_384)
+                                    val read = runCatching { sock.getInputStream().read(buf) }.getOrDefault(-1)
+                                    if (read > 0) {
+                                        val decoder = com.linkme.androidbridge.core.protocol.FrameDecoder()
+                                        decoder.append(buf.copyOf(read))
+                                        for (replyFrame in decoder.drainFrames()) {
+                                            routeInboundFrame(replyFrame)
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                    runCatching { emitImmediateTelemetry() }
+
+                    // 6-second PAIR_ACK watchdog so Android never hangs or fakes Connected
+                    serviceScope.launch {
+                        kotlinx.coroutines.delay(6000L)
+                        BridgeActivityHub.failPairingIfWaiting(
+                            "Mac did not respond — check Mac Bluetooth permission or move closer and retry"
+                        )
+                    }
+
                     BridgeActivityHub.record(
                         BridgeActivityItem(
                             category = ActivityCategory.SYSTEM,
@@ -697,11 +711,30 @@ class BridgeForegroundService : Service() {
                 }
             }
 
+            WireMessageType.FILE_RESPONSE -> {
+                if (transferMgr != null) {
+                    runCatching { json.decodeFromString<FileResponsePayload>(frame.payload.decodeToString()) }
+                        .onSuccess { response ->
+                            transferMgr.handleFileResponse(response)
+                        }
+                }
+            }
+
             WireMessageType.FILE_CHUNK -> {
                 if (transferMgr != null) {
                     runCatching { FileChunkPacket.decode(frame.payload) }
                         .onSuccess { packet ->
                             val progress = transferMgr.receiveChunk(packet)
+                            val transportLabel = if (BridgeActivityHub.wifiConnected.value) "Wi-Fi mTLS" else "BLE E2EE"
+                            BridgeActivityHub.updateFileTransfer(
+                                FileTransferUiState(
+                                    filename = progress.filename,
+                                    bytesTransferred = progress.bytesTransferred,
+                                    totalBytes = progress.totalBytes,
+                                    queueRemaining = 0,
+                                    transportLabel = transportLabel
+                                )
+                            )
                             if (progress.bytesTransferred >= progress.totalBytes) {
                                 val verifiedFile = transferMgr.finalizeIncomingTransfer(packet.transferId)
                                 val exportedUri = transferMgr.exportToMediaStoreDownloads(
@@ -709,6 +742,7 @@ class BridgeForegroundService : Service() {
                                     verifiedFile,
                                     "application/octet-stream"
                                 )
+                                BridgeActivityHub.updateFileTransfer(null)
                                 postFileReceivedNotification(verifiedFile.name, exportedUri)
                                 BridgeActivityHub.record(
                                     BridgeActivityItem(
@@ -736,11 +770,29 @@ class BridgeForegroundService : Service() {
             WireMessageType.PAIR_ACK -> {
                 runCatching { json.decodeFromString<PairAckPayload>(frame.payload.decodeToString()) }
                     .onSuccess { ack ->
-                        BridgeActivityHub.updatePeerTelemetry(
-                            percent = ack.batteryLevel,
-                            charging = ack.isCharging,
-                            name = ack.deviceName
-                        )
+                        val pending = BridgeActivityHub.pendingPairingCandidate
+                        val store = trustStore
+                        if (pending != null && store != null && ack.accepted &&
+                            ack.spkiSha256.equals(pending.pinnedCertSha256, ignoreCase = true)
+                        ) {
+                            store.savePeer(
+                                com.linkme.androidbridge.core.crypto.TrustedPeer(
+                                    deviceId = pending.peerId,
+                                    deviceName = ack.deviceName.ifBlank { pending.peerName },
+                                    pinnedCertSha256 = pending.pinnedCertSha256,
+                                    sharedBleSecret = pending.sharedBleSecret,
+                                    bluetoothSessionKey = pending.bluetoothSessionKey
+                                )
+                            )
+                            BridgeActivityHub.completePairingSuccess(pending, ack)
+                            BridgeActivityHub.onPeerTrustedUpdated?.invoke()
+                        } else {
+                            BridgeActivityHub.updatePeerTelemetry(
+                                percent = ack.batteryLevel,
+                                charging = ack.isCharging,
+                                name = ack.deviceName
+                            )
+                        }
                         BridgeActivityHub.record(
                             BridgeActivityItem(
                                 category = ActivityCategory.SYSTEM,
@@ -755,6 +807,7 @@ class BridgeForegroundService : Service() {
                 runCatching { json.decodeFromString<ScreenControlPayload>(frame.payload.decodeToString()) }
                     .onSuccess { ctrl ->
                         if (ctrl.source == "android" && ctrl.action == "stop") {
+                            BridgeActivityHub.setStealthBlack(false)
                             if (ScreenMirrorService.hasActiveSession) {
                                 val pauseIntent = Intent(this, ScreenMirrorService::class.java).apply {
                                     action = ScreenMirrorService.ACTION_PAUSE
@@ -767,6 +820,12 @@ class BridgeForegroundService : Service() {
                                 runCatching { startService(stopIntent) }
                             }
                         } else if (ctrl.source == "android" && (ctrl.action == "start" || ctrl.action == "resume")) {
+                            if (ctrl.wake || ctrl.stealthBlack) {
+                                wakePhoneDisplay(stealthBlack = ctrl.stealthBlack)
+                            }
+                            if (!ctrl.stealthBlack) {
+                                BridgeActivityHub.setStealthBlack(false)
+                            }
                             if (ScreenMirrorService.hasActiveSession) {
                                 val resumeIntent = Intent(this, ScreenMirrorService::class.java).apply {
                                     action = ScreenMirrorService.ACTION_RESUME
@@ -977,9 +1036,13 @@ class BridgeForegroundService : Service() {
                             }
                         }
                         try {
-                            val transportLabel = if (BridgeActivityHub.wifiConnected.value) "Wi-Fi mTLS" else "BLE E2EE"
+                            val wifiUp = BridgeActivityHub.wifiConnected.value
+                            val transportLabel = if (wifiUp) "Wi-Fi mTLS" else "BLE E2EE"
+                            val adaptiveChunk = if (wifiUp) FileTransferManager.CHUNK_SIZE else 2048
                             transferMgr.streamOutboundFile(
                                 sourceFile = staged,
+                                chunkSize = adaptiveChunk,
+                                awaitAcceptance = false,
                                 onProgress = { p ->
                                     BridgeActivityHub.updateFileTransfer(
                                         FileTransferUiState(
@@ -1019,6 +1082,25 @@ class BridgeForegroundService : Service() {
             } finally {
                 fileSendBusy.set(false)
             }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun wakePhoneDisplay(stealthBlack: Boolean) {
+        runCatching {
+            val pm = getSystemService(PowerManager::class.java)
+            val wl = pm?.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                "LinkMe:WakeMirror"
+            )
+            wl?.acquire(3000L)
+        }
+        runCatching {
+            val wakeIntent = Intent(this, com.linkme.androidbridge.ui.ScreenWakeActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                putExtra(com.linkme.androidbridge.ui.ScreenWakeActivity.EXTRA_STEALTH_BLACK, stealthBlack)
+            }
+            startActivity(wakeIntent)
         }
     }
 

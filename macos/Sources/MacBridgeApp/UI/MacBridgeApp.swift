@@ -169,6 +169,7 @@ final class BridgeDashboardViewModel: ObservableObject {
     @Published var isViewingRemoteScreen: Bool = false
     @Published var isSharingLocalScreen: Bool = false
     @Published var isMirrorAuthenticated: Bool = false
+    @Published var isMirrorStealthBlack: Bool = false
     @Published var remoteScreenImage: NSImage?
     @Published var remoteScreenWidth: Int = 1080
     @Published var remoteScreenHeight: Int = 2400
@@ -529,8 +530,15 @@ final class BridgeDashboardViewModel: ObservableObject {
         }
         mirrorStatusText = "Requesting \(peerName) screen..."
         mirrorWindowController?.syncFromViewModel()
-        let fps = bridgeState == .activeWifiStream ? 60 : 3
-        let ctrl = ScreenControlPayload(action: "start", source: "android", fps: fps, quality: 65)
+        let fps = bridgeState == .activeWifiStream ? 60 : 12
+        let ctrl = ScreenControlPayload(
+            action: "start",
+            source: "android",
+            fps: fps,
+            quality: 65,
+            wake: true,
+            stealthBlack: isMirrorStealthBlack
+        )
         Task {
             if let data = try? JSONEncoder().encode(ctrl),
                let frame = try? await transportManager.makeFrame(messageType: .screenControl, payload: data) {
@@ -539,13 +547,29 @@ final class BridgeDashboardViewModel: ObservableObject {
         }
     }
 
+    func toggleMirrorStealthBlack() {
+        isMirrorStealthBlack.toggle()
+        mirrorWindowController?.syncFromViewModel()
+        if isViewingRemoteScreen {
+            startPhoneMirrorStream()
+        }
+    }
+
     func stopPhoneMirrorStream() {
         isViewingRemoteScreen = false
+        isMirrorStealthBlack = false
         remoteScreenImage = nil
         remoteMirrorFps = 0
         mirrorStatusText = "Standby"
         mirrorWindowController?.syncFromViewModel()
-        let ctrl = ScreenControlPayload(action: "stop", source: "android", fps: 24, quality: 65)
+        let ctrl = ScreenControlPayload(
+            action: "stop",
+            source: "android",
+            fps: 24,
+            quality: 65,
+            wake: false,
+            stealthBlack: false
+        )
         Task {
             if let data = try? JSONEncoder().encode(ctrl),
                let frame = try? await transportManager.makeFrame(messageType: .screenControl, payload: data) {
@@ -775,6 +799,11 @@ final class BridgeDashboardViewModel: ObservableObject {
                 } else {
                     await acceptIncomingFileOffer(offer)
                 }
+            }
+
+        case .fileResponse:
+            if let resp = try? JSONDecoder().decode(FileResponsePayload.self, from: frame.payload) {
+                await fileTransferManager.handleFileResponse(resp)
             }
 
         case .fileChunk:
@@ -1045,12 +1074,16 @@ final class BridgeDashboardViewModel: ObservableObject {
     func sendFile(url: URL) {
         let transferId = UUID()
         activeTransferId = transferId
+        let useWifiChunks = (bridgeState == .activeWifiStream)
+        let adaptiveChunkSize = useWifiChunks ? FileTransferManager.chunkSize : 2048
         Task { [weak self] in
             guard let self else { return }
             do {
                 _ = try await fileTransferManager.streamOutboundFile(
                     fileURL: url,
                     transferId: transferId,
+                    chunkSize: adaptiveChunkSize,
+                    awaitOfferAcceptance: true,
                     onProgress: { progress in
                         await MainActor.run {
                             self.activeTransfer = progress
@@ -1092,6 +1125,22 @@ final class BridgeDashboardViewModel: ObservableObject {
 
     func refreshPairingSession() async {
         do {
+            try? await pairingFeature.startTemporaryListener(
+                onReadyPort: { [weak self] port in
+                    Task { @MainActor [weak self] in
+                        self?.localListeningPort = port
+                    }
+                },
+                onPairHelloReceived: { [weak self] hello in
+                    Task { @MainActor [weak self] in
+                        await self?.processIncomingPairHello(hello)
+                    }
+                },
+                onPairCommitReceived: { [weak self] commit in
+                    guard let self else { return nil }
+                    return await self.confirmPeerFromCommit(commit)
+                }
+            )
             let (uri, expires) = try await pairingFeature.beginPairingSession(
                 tcpPort: localListeningPort,
                 deviceName: preferences.normalizedAlias

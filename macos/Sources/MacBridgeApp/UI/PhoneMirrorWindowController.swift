@@ -228,6 +228,7 @@ private final class PhoneChassisRootView: NSView {
     private let homeButton = HoverIconButton(symbolName: "house", tooltip: "Home (⌘1)")
     private let recentsButton = HoverIconButton(symbolName: "square.stack", tooltip: "App Switcher (⌘2)")
     private let backButton = HoverIconButton(symbolName: "chevron.backward", tooltip: "Back (Esc)")
+    private let stealthButton = HoverIconButton(symbolName: "moon.fill", tooltip: "Stealth Black Phone Screen")
     private let pinButton = HoverIconButton(symbolName: "pin", tooltip: "Always on Top")
     private let lockBarButton = HoverIconButton(symbolName: "lock.fill", tooltip: "Lock Screen Mirroring")
 
@@ -327,10 +328,11 @@ private final class PhoneChassisRootView: NSView {
         homeButton.onClick = { [weak self] in self?.viewModel.sendRemoteInput(.key("home")) }
         recentsButton.onClick = { [weak self] in self?.viewModel.sendRemoteInput(.key("recents")) }
         backButton.onClick = { [weak self] in self?.viewModel.sendRemoteInput(.key("back")) }
+        stealthButton.onClick = { [weak self] in self?.viewModel.toggleMirrorStealthBlack() }
         pinButton.onClick = { [weak self] in self?.onTogglePinRequested?() }
         lockBarButton.onClick = { [weak self] in self?.onLockRequested?() }
 
-        for btn in [closeButton, minimizeButton, titleBadgeLabel, homeButton, recentsButton, backButton, pinButton, lockBarButton] as [NSView] {
+        for btn in [closeButton, minimizeButton, titleBadgeLabel, homeButton, recentsButton, backButton, stealthButton, pinButton, lockBarButton] as [NSView] {
             hoverBar.addSubview(btn)
         }
         addSubview(hoverBar)
@@ -408,7 +410,7 @@ private final class PhoneChassisRootView: NSView {
         closeButton.frame = NSRect(x: 8, y: 8, width: 14, height: 14)
         minimizeButton.frame = NSRect(x: 27, y: 8, width: 14, height: 14)
 
-        let rightButtons: [NSView] = [lockBarButton, pinButton, backButton, recentsButton, homeButton]
+        let rightButtons: [NSView] = [lockBarButton, pinButton, stealthButton, backButton, recentsButton, homeButton]
         var rx = barW - 26
         for btn in rightButtons {
             btn.frame = NSRect(x: rx, y: 5, width: 20, height: 20)
@@ -427,6 +429,7 @@ private final class PhoneChassisRootView: NSView {
             transportTag = "BLE"
         }
         titleBadgeLabel.stringValue = "\(viewModel.peerName) • \(transportTag)"
+        stealthButton.updateSymbol(viewModel.isMirrorStealthBlack ? "moon.zzz.fill" : "moon.fill")
         inputView.updateRemoteImage(viewModel.remoteScreenImage, statusText: viewModel.mirrorStatusText)
     }
 

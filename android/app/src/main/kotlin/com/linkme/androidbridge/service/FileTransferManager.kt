@@ -19,7 +19,9 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 data class FileTransferProgress(
     val transferId: UUID,
@@ -40,6 +42,8 @@ class FileTransferManager(
 ) {
     private val cancelledIds = ConcurrentHashMap.newKeySet<UUID>()
     private val activeReceives = ConcurrentHashMap<UUID, ActiveReceive>()
+    private val responseWaiters = ConcurrentHashMap<String, CompletableFuture<Boolean>>()
+    private val completedResponses = ConcurrentHashMap<String, Boolean>()
 
     private class ActiveReceive(
         val offer: FileOfferPayload,
@@ -53,24 +57,49 @@ class FileTransferManager(
 
     fun cancelTransfer(transferId: UUID) {
         cancelledIds.add(transferId)
+        responseWaiters.remove(transferId.toString().lowercase())?.complete(false)
         activeReceives.remove(transferId)?.let { active ->
             runCatching { active.outStream.close() }
             active.partFile.delete()
         }
     }
 
+    fun handleFileResponse(response: FileResponsePayload) {
+        val key = response.transferId.lowercase()
+        val waiter = responseWaiters.remove(key)
+        if (waiter != null) {
+            waiter.complete(response.accepted)
+        } else {
+            completedResponses[key] = response.accepted
+        }
+    }
+
+    fun awaitOfferAcceptance(transferId: UUID, timeoutMs: Long = 6_000L): Boolean {
+        val key = transferId.toString().lowercase()
+        completedResponses.remove(key)?.let { return it }
+        val future = CompletableFuture<Boolean>()
+        responseWaiters[key] = future
+        completedResponses.remove(key)?.let { future.complete(it) }
+        return runCatching { future.get(timeoutMs, TimeUnit.MILLISECONDS) }
+            .getOrDefault(false)
+            .also { responseWaiters.remove(key) }
+    }
+
     fun streamOutboundFile(
         sourceFile: File,
         transferId: UUID = UUID.randomUUID(),
         mimeType: String = "application/octet-stream",
+        chunkSize: Int = CHUNK_SIZE,
+        awaitAcceptance: Boolean = false,
         onProgress: ((FileTransferProgress) -> Unit)? = null,
         emitFrame: (WireFrame) -> Unit
     ): FileOfferPayload {
         val totalBytes = sourceFile.length()
         if (totalBytes <= 0L) throw FileTransferException("File is empty or missing")
 
+        val effChunkSize = chunkSize.coerceIn(512, CHUNK_SIZE)
         val fileSha256 = streamingSha256Hex(FileInputStream(sourceFile))
-        val totalChunks = ((totalBytes + CHUNK_SIZE - 1L) / CHUNK_SIZE).toInt()
+        val totalChunks = ((totalBytes + effChunkSize - 1L) / effChunkSize).toInt()
         val safeFilename = FilenameSanitizer.sanitize(sourceFile.name)
 
         val offer = FileOfferPayload(
@@ -78,7 +107,7 @@ class FileTransferManager(
             filename = safeFilename,
             byteSize = totalBytes,
             sha256 = fileSha256,
-            chunkSize = CHUNK_SIZE,
+            chunkSize = effChunkSize,
             totalChunks = totalChunks,
             mimeType = mimeType
         )
@@ -91,7 +120,11 @@ class FileTransferManager(
             )
         )
 
-        val buffer = ByteArray(CHUNK_SIZE)
+        if (awaitAcceptance && !awaitOfferAcceptance(transferId, 6_000L)) {
+            throw FileTransferException("File offer was not accepted by peer")
+        }
+
+        val buffer = ByteArray(effChunkSize)
         val startedAt = System.currentTimeMillis()
         var chunkIndex = 0
         var bytesSent = 0L

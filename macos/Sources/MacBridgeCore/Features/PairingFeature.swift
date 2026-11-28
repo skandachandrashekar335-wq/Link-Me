@@ -92,6 +92,14 @@ public actor PairingFeature {
         guard let session = activeSession else {
             throw PairingCryptoError.sessionExpired
         }
+        if let providedToken = commit.pairToken, !providedToken.isEmpty {
+            let expectedData = Data(session.pairToken.lowercased().utf8)
+            let providedData = Data(providedToken.lowercased().utf8)
+            guard expectedData.count == providedData.count,
+                  ConstantTime.equals(expectedData, providedData) else {
+                throw PairingCryptoError.invalidPeerPublicKey
+            }
+        }
         let derived = try session.deriveSecrets(
             peerPublicKeyString: commit.ephemeralPublicKey,
             nonce: session.nonce,
@@ -132,6 +140,11 @@ public actor PairingFeature {
             isCharging: battery.isCharging
         )
         return (peer, ack)
+    }
+
+    public func hasActivePairingWindow(at date: Date = Date()) -> Bool {
+        guard let session = activeSession else { return false }
+        return !session.isExpired(at: date)
     }
 
     public func buildPairAck(deviceName: String? = nil) throws -> PairAckPayload {
@@ -270,10 +283,14 @@ public actor PairingFeature {
 
         for ptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
             let interface = ptr.pointee
+            let flags = Int32(interface.ifa_flags)
+            guard (flags & IFF_UP) != 0, (flags & IFF_LOOPBACK) == 0 else { continue }
             let addrFamily = interface.ifa_addr.pointee.sa_family
             guard addrFamily == UInt8(AF_INET) else { continue }
             let name = String(cString: interface.ifa_name)
-            guard name.hasPrefix("en") else { continue }
+            guard !name.hasPrefix("utun"), !name.hasPrefix("awdl"),
+                  !name.hasPrefix("llw"), !name.hasPrefix("bridge"),
+                  name.hasPrefix("en") else { continue }
             var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
             if getnameinfo(
                 interface.ifa_addr,

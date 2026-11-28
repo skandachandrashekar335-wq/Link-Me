@@ -663,4 +663,123 @@ class TransportAndLoopbackTest {
             server.stop()
         }
     }
+
+    @Test
+    fun v2BootstrapUriBleFallbackFileAcceptAndWakeStealth() {
+        // 1. Offline v=2 URI parsing (no ip/port) & pairToken propagation
+        val macIdMgr = IdentityManager(useAndroidKeyStore = false)
+        val macId = macIdMgr.loadOrCreateIdentity("11111111-1111-4111-8111-111111111111")
+        val macCrypto = PairingCrypto()
+        val offlineUri = macCrypto.makePairingUri(
+            deviceId = macId.deviceId,
+            certSha256Hex = macId.certificateSha256Hex,
+            tcpPort = 0,
+            lanHost = null,
+            deviceName = "Skanda MacBook Air M5"
+        )
+        val parsed = PairingUriPayload.parse(offlineUri.uriString)
+        assertEquals(2, parsed.version)
+        assertEquals(macCrypto.pairToken, parsed.pairToken)
+        assertEquals(null, parsed.lanHost)
+
+        val androidCrypto = PairingCrypto()
+        val nonce = parsed.nonceHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val derived = androidCrypto.deriveSecrets(parsed.publicKeyBase64Url, nonce)
+        val commit = PairCommitPayload(
+            deviceId = "22222222-2222-4222-8222-222222222222",
+            deviceName = "SM-A736B",
+            ephemeralPublicKey = androidCrypto.publicKeyBase64Url,
+            spkiSha256 = "b".repeat(64),
+            sasMacHex = PairingCommitMac.computeHex(
+                derived.sharedBleSecret,
+                "22222222-2222-4222-8222-222222222222",
+                "b".repeat(64),
+                androidCrypto.publicKeyBase64Url
+            ),
+            batteryLevel = 73,
+            isCharging = true,
+            pairToken = parsed.pairToken
+        )
+        val decodedCommit = Json.decodeFromString<PairCommitPayload>(Json.encodeToString(commit))
+        assertEquals(parsed.pairToken, decodedCommit.pairToken)
+
+        // 2. BLE-only resilient fallback with Wi-Fi backoff avoids repeated Wi-Fi dial stalls
+        val wifiCalls = AtomicInteger(0)
+        val bleCalls = AtomicInteger(0)
+        val router = TransportManager(
+            cooldownDurationMs = 200L,
+            bleSender = { bleCalls.incrementAndGet() },
+            wifiOpener = { 49152 },
+            wifiSender = {
+                wifiCalls.incrementAndGet()
+                throw java.net.ConnectException("Off LAN")
+            },
+            wifiCloser = {}
+        )
+        try {
+            val payload = ByteArray(800) { 0x3C }
+            for (i in 1..3) {
+                router.sendResilientFrame(
+                    WireFrame(WireMessageType.FILE_CHUNK, i.toLong(), payload),
+                    preferBle = false
+                )
+            }
+            assertEquals(1, wifiCalls.get())
+            assertEquals(3, bleCalls.get())
+        } finally {
+            router.shutdown()
+        }
+
+        // 3. FILE_OFFER -> FILE_RESPONSE -> adaptive 2048B FILE_CHUNK -> verified disk file
+        val tmpRoot = Files.createTempDirectory("linkme-v2-ft").toFile()
+        try {
+            val src = File(tmpRoot, "photo.bin")
+            val raw = ByteArray(5000) { ((it * 13) and 0xFF).toByte() }
+            src.writeBytes(raw)
+            val senderFT = FileTransferManager(File(tmpRoot, "rx"))
+            val receiverFT = FileTransferManager(File(tmpRoot, "rx"))
+            var completedFile: File? = null
+            val txId = UUID.randomUUID()
+            val offer = senderFT.streamOutboundFile(
+                sourceFile = src,
+                transferId = txId,
+                chunkSize = 2048,
+                awaitAcceptance = true
+            ) { frame ->
+                when (frame.messageType) {
+                    WireMessageType.FILE_OFFER -> {
+                        val o = Json.decodeFromString<FileOfferPayload>(frame.payload.decodeToString())
+                        val resp = receiverFT.beginIncomingTransfer(o)
+                        senderFT.handleFileResponse(resp)
+                    }
+                    WireMessageType.FILE_CHUNK -> {
+                        val pkt = FileChunkPacket.decode(frame.payload)
+                        val p = receiverFT.receiveChunk(pkt)
+                        if (p.bytesTransferred >= p.totalBytes) {
+                            completedFile = receiverFT.finalizeIncomingTransfer(pkt.transferId)
+                        }
+                    }
+                    else -> Unit
+                }
+            }
+            assertEquals(2048, offer.chunkSize)
+            assertEquals(3, offer.totalChunks)
+            assertNotNull(completedFile)
+            assertArrayEquals(raw, completedFile!!.readBytes())
+        } finally {
+            tmpRoot.deleteRecursively()
+        }
+
+        // 4. Wake + StealthBlack ScreenControl codec
+        val ctrl = ScreenControlPayload(
+            action = "start",
+            source = "android",
+            fps = 60,
+            quality = 65,
+            wake = true,
+            stealthBlack = true
+        )
+        val decodedCtrl = Json.decodeFromString<ScreenControlPayload>(Json.encodeToString(ctrl))
+        assertTrue(decodedCtrl.wake && decodedCtrl.stealthBlack && decodedCtrl.fps == 60)
+    }
 }

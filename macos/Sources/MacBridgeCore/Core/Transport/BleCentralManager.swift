@@ -40,6 +40,8 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
     private var packetSeq: UInt32 = 1
     private var ackWaiters: [UInt32: DispatchSemaphore] = [:]
     private let ackLock = NSLock()
+    private var characteristicWriteSem: DispatchSemaphore?
+    private let writeLock = NSLock()
     private var heartbeatTimer: DispatchSourceTimer?
     private var lastPingSentAt: Date?
 
@@ -106,7 +108,7 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
                 return
             }
 
-            let packets = BluetoothPacketCodec.packetize(envelope: envelope, packetId: self.packetSeq, mtu: min(512, max(23, peripheral.maximumWriteValueLength(for: .withoutResponse) + 3)))
+            let packets = BluetoothPacketCodec.packetize(envelope: envelope, packetId: self.packetSeq, mtu: min(512, max(23, peripheral.maximumWriteValueLength(for: .withResponse) + 3)))
             let pid = self.packetSeq
             self.packetSeq &+= 1
             let writeType: CBCharacteristicWriteType = (packets.count <= 2 && char.properties.contains(.writeWithoutResponse))
@@ -118,10 +120,18 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
                 self.ackLock.withLock { self.ackWaiters[pid] = sem }
             }
             for pkt in packets {
-                peripheral.writeValue(pkt, for: char, type: writeType)
+                if writeType == .withResponse {
+                    let writeSem = DispatchSemaphore(value: 0)
+                    self.writeLock.withLock { self.characteristicWriteSem = writeSem }
+                    peripheral.writeValue(pkt, for: char, type: .withResponse)
+                    _ = writeSem.wait(timeout: .now() + .milliseconds(1500))
+                    self.writeLock.withLock { self.characteristicWriteSem = nil }
+                } else {
+                    peripheral.writeValue(pkt, for: char, type: .withoutResponse)
+                }
             }
             if let sem {
-                _ = sem.wait(timeout: .now() + .milliseconds(800))
+                _ = sem.wait(timeout: .now() + .milliseconds(1200))
                 self.ackLock.withLock { _ = self.ackWaiters.removeValue(forKey: pid) }
             }
         }
@@ -242,6 +252,16 @@ public final class BleCentralManager: NSObject, CBCentralManagerDelegate, CBPeri
             } else if char.uuid == Self.l2capPsmCharUUID {
                 peripheral.readValue(for: char)
             }
+        }
+    }
+
+    public func peripheral(
+        _ peripheral: CBPeripheral,
+        didWriteValueFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        writeLock.withLock {
+            characteristicWriteSem?.signal()
         }
     }
 

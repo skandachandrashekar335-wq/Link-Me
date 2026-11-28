@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="v2.1.2"
+VERSION="v3.0.0"
 RELEASE_BASE="https://github.com/skandachandrashekar335-wq/Link-Me/releases/download/${VERSION}"
 CORE_APK="AndroidBridge-${VERSION}.apk"
-ADDON_APK="AndroidBridge-NotifyAddon-${VERSION}.apk"
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:${HOME}/Library/Android/sdk/platform-tools:${PATH}"
 ADB_BIN="$(command -v adb || true)"
@@ -39,7 +38,6 @@ resolve_apk() {
 }
 
 CORE_PATH="$(resolve_apk "$CORE_APK")"
-ADDON_PATH="$(resolve_apk "$ADDON_APK")"
 
 echo "Checking USB-connected Android device (USB Debugging enabled)..."
 DEVICE_SERIALS=()
@@ -58,16 +56,13 @@ fi
 "$ADB_BIN" devices
 
 for SERIAL in "${DEVICE_SERIALS[@]}"; do
-  echo "Installing ${CORE_APK} on ${SERIAL} (bypasses Play Protect prompts over USB)..."
+  echo "Installing ${CORE_APK} on ${SERIAL}..."
   "$ADB_BIN" -s "$SERIAL" install -r -g "$CORE_PATH" || "$ADB_BIN" -s "$SERIAL" install -r "$CORE_PATH"
-
-  echo "Installing ${ADDON_APK} on ${SERIAL}..."
-  "$ADB_BIN" -s "$SERIAL" install -r -g "$ADDON_PATH" || "$ADB_BIN" -s "$SERIAL" install -r "$ADDON_PATH"
 done
 
 echo ""
 echo "==========================================================="
-echo " Done! Both Link-Me APKs (${VERSION}) installed cleanly."
+echo " Done! Link-Me APK (${VERSION}) installed cleanly."
 echo " Open AndroidBridge -> Scan QR -> Point at MacBridge QR."
 echo "==========================================================="
 read -r -p "Press Enter to close..."

@@ -26,16 +26,6 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.CAMERA" />
 
-    <!-- Signature-verified local IPC with optional Notification Mirroring Add-on -->
-    <permission
-        android:name="com.linkme.androidbridge.permission.MIRROR_IPC"
-        android:protectionLevel="signature" />
-    <uses-permission android:name="com.linkme.androidbridge.permission.MIRROR_IPC" />
-
-    <queries>
-        <package android:name="com.linkme.androidbridge.notifyaddon" />
-    </queries>
-
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
@@ -91,15 +81,15 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 
-        <!-- Signature-verified IPC receiver for optional AndroidBridge-NotifyAddon APK -->
-        <receiver
-            android:name=".service.NotificationCompanionReceiver"
+        <service
+            android:name=".service.BridgeNotificationListener"
             android:exported="true"
-            android:permission="com.linkme.androidbridge.permission.MIRROR_IPC">
+            android:label="Link-Me Notification Listener"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
-                <action android:name="com.linkme.androidbridge.ACTION_NOTIFICATION_EVENT_IPC" />
+                <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
-        </receiver>
+        </service>
 
         <service
             android:name=".service.ClipboardTileService"

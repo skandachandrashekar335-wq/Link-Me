@@ -21,7 +21,8 @@ data class PendingPairingCandidate(
     val pinnedCertSha256: String,
     val sharedBleSecret: ByteArray,
     val bluetoothSessionKey: ByteArray,
-    val pairToken: String
+    val pairToken: String,
+    val btAddress: String? = null
 )
 
 sealed class PairingCommitStatus {

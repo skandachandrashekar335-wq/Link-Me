@@ -247,12 +247,12 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     onNotificationAccessClick = {
-                        if (addonStatus == NotificationAddonStatus.NOT_INSTALLED) {
+                        val opened = runCatching {
+                            startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                            true
+                        }.getOrDefault(false)
+                        if (!opened || addonStatus != NotificationAddonStatus.ACTIVE) {
                             showAddonGuideDialog = true
-                        } else {
-                            runCatching {
-                                startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-                            }
                         }
                     },
                     onSendInlineReply = { key, replyText ->
@@ -364,14 +364,14 @@ class MainActivity : ComponentActivity() {
                         containerColor = pal.surfaceContainer,
                         titleContentColor = pal.onSurface,
                         textContentColor = pal.secondaryText,
-                        title = { Text("Optional Notification Add-on") },
+                        title = { Text("Enable Notification Access") },
                         text = {
                             Text(
-                                "AndroidBridge keeps Notification Listener permission out of the main APK so Play Protect installs cleanly.\n\n" +
-                                    "To enable notification mirroring:\n" +
-                                    "1. Double-click Install-on-Android.command in MacBridge.dmg over USB, OR\n" +
-                                    "2. Run: adb install -r -g AndroidBridge-NotifyAddon-v2.1.2.apk\n" +
-                                    "3. Grant Restricted Settings -> Notification Access to Link-Me Notify Add-on.",
+                                "To mirror notifications to your Mac, AndroidBridge requires Notification Access in system settings.\n\n" +
+                                    "If the toggle in Settings is disabled ('Restricted setting'):\n" +
+                                    "1. Long press AndroidBridge app icon -> App info\n" +
+                                    "2. Tap the top-right three dots (⋮) -> 'Allow restricted settings'\n" +
+                                    "3. Return to Notification Access and toggle AndroidBridge ON.",
                                 fontSize = 13.sp,
                                 fontFamily = FontFamily.Default
                             )
@@ -381,16 +381,11 @@ class MainActivity : ComponentActivity() {
                                 onClick = {
                                     showAddonGuideDialog = false
                                     runCatching {
-                                        startActivity(
-                                            Intent(
-                                                Intent.ACTION_VIEW,
-                                                Uri.parse("https://github.com/skandachandrashekar335-wq/Link-Me/releases/latest")
-                                            )
-                                        )
+                                        startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
                                     }
                                 }
                             ) {
-                                Text("Open Release", color = pal.primaryAccent)
+                                Text("Open Settings", color = pal.primaryAccent)
                             }
                         },
                         dismissButton = {

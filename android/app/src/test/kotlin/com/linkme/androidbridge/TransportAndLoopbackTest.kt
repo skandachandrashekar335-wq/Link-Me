@@ -683,7 +683,7 @@ class TransportAndLoopbackTest {
             deviceName = "Skanda MacBook Air M5"
         )
         val parsed = PairingUriPayload.parse(offlineUri.uriString)
-        assertEquals(2, parsed.version)
+        assertEquals(3, parsed.version)
         assertEquals(macCrypto.pairToken, parsed.pairToken)
         assertEquals(null, parsed.lanHost)
 

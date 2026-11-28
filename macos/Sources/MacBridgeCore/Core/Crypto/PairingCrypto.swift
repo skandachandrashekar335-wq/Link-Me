@@ -22,6 +22,7 @@ public struct PairingUriPayload: Sendable, Equatable {
     public let bleServiceUuid: String?
     public let lanHost: String?
     public let deviceName: String?
+    public let btAddress: String?
 
     public init(
         version: Int,
@@ -33,7 +34,8 @@ public struct PairingUriPayload: Sendable, Equatable {
         tcpPort: UInt16,
         bleServiceUuid: String? = PairingUriPayload.defaultBleServiceUuid,
         lanHost: String? = nil,
-        deviceName: String? = nil
+        deviceName: String? = nil,
+        btAddress: String? = nil
     ) {
         self.version = version
         self.deviceId = deviceId
@@ -45,6 +47,7 @@ public struct PairingUriPayload: Sendable, Equatable {
         self.bleServiceUuid = bleServiceUuid
         self.lanHost = lanHost
         self.deviceName = deviceName
+        self.btAddress = btAddress
     }
 
     public var hasFullCertFingerprint: Bool {
@@ -75,6 +78,9 @@ public struct PairingUriPayload: Sendable, Equatable {
         if let name = deviceName, !name.isEmpty {
             queryItems.append(URLQueryItem(name: "name", value: name))
         }
+        if let bt = btAddress, !bt.isEmpty {
+            queryItems.append(URLQueryItem(name: "bt", value: bt))
+        }
         components.queryItems = queryItems
         return components.string ?? "linkme://pair?v=\(version)&id=\(deviceId)&pk=\(publicKeyBase64Url)&fp=\(certSha256Prefix)&nonce=\(nonceHex)&tok=\(pairToken)&ble=1"
     }
@@ -90,7 +96,7 @@ public struct PairingUriPayload: Sendable, Equatable {
         let dict = Dictionary(items.compactMap { item in
             item.value.map { (item.name, $0) }
         }, uniquingKeysWith: { _, latest in latest })
-        guard let vStr = dict["v"], let version = Int(vStr), (version == 1 || version == 2),
+        guard let vStr = dict["v"], let version = Int(vStr), (version == 1 || version == 2 || version == 3),
               let deviceId = dict["id"], !deviceId.isEmpty,
               let pub = dict["pk"] ?? dict["pub"], !pub.isEmpty,
               let fp = dict["fp"], fp.count >= 16,
@@ -108,6 +114,7 @@ public struct PairingUriPayload: Sendable, Equatable {
         }
         let bleRaw = dict["ble"]
         let bleUuid = (bleRaw == "1" || bleRaw == nil || bleRaw?.isEmpty == true) ? defaultBleServiceUuid : bleRaw
+        let btAddress = dict["bt"]
         return PairingUriPayload(
             version: version,
             deviceId: deviceId,
@@ -118,7 +125,8 @@ public struct PairingUriPayload: Sendable, Equatable {
             tcpPort: port,
             bleServiceUuid: bleUuid,
             lanHost: dict["ip"] ?? dict["host"],
-            deviceName: dict["name"]
+            deviceName: dict["name"],
+            btAddress: btAddress
         )
     }
 }
@@ -191,10 +199,11 @@ public struct PairingCrypto: @unchecked Sendable {
         tcpPort: UInt16,
         bleServiceUuid: String? = PairingUriPayload.defaultBleServiceUuid,
         lanHost: String? = nil,
-        deviceName: String? = nil
+        deviceName: String? = nil,
+        btAddress: String? = nil
     ) -> PairingUriPayload {
         PairingUriPayload(
-            version: 2,
+            version: 3,
             deviceId: deviceId,
             publicKeyBase64Url: publicKeyBase64Url,
             certSha256Prefix: certSha256Hex.lowercased(),
@@ -203,7 +212,8 @@ public struct PairingCrypto: @unchecked Sendable {
             tcpPort: tcpPort,
             bleServiceUuid: bleServiceUuid,
             lanHost: lanHost,
-            deviceName: deviceName
+            deviceName: deviceName,
+            btAddress: btAddress
         )
     }
 

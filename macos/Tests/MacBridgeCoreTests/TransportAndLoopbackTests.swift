@@ -655,7 +655,7 @@ struct TransportAndLoopbackTests {
 
         let (uri, _) = try await pairing.beginPairingSession(tcpPort: 0, deviceName: "Skanda MacBook Air M5")
         let parsed = try PairingUriPayload.parse(uri.uriString)
-        #expect(parsed.version == 2)
+        #expect(parsed.version == 3)
         #expect(!parsed.pairToken.isEmpty)
         #expect(await pairing.hasActivePairingWindow())
 

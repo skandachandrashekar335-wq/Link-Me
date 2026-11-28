@@ -19,7 +19,10 @@ let package = Package(
     targets: [
         .target(
             name: "MacBridgeCore",
-            path: "Sources/MacBridgeCore"
+            path: "Sources/MacBridgeCore",
+            linkerSettings: [
+                .linkedFramework("IOBluetooth")
+            ]
         ),
         .executableTarget(
             name: "MacBridgeApp",

@@ -114,7 +114,8 @@ private data class ParsedPairingState(
     val localDeviceId: String,
     val localDeviceName: String,
     val localEphemeralPublicKey: String,
-    val localSpkiSha256: String
+    val localSpkiSha256: String,
+    val btAddress: String? = null
 )
 
 /**
@@ -220,7 +221,8 @@ fun QrScannerScreen(
                     localDeviceId = localIdentity.deviceId,
                     localDeviceName = advertisedDeviceName,
                     localEphemeralPublicKey = crypto.publicKeyBase64Url,
-                    localSpkiSha256 = localIdentity.certificateSha256Hex
+                    localSpkiSha256 = localIdentity.certificateSha256Hex,
+                    btAddress = parsed.btAddress
                 )
                 if (resolvedFp.length == 64 && resolvedFp.all { it in '0'..'9' || it in 'a'..'f' }) {
                     val snap = TelemetryFeature(localIdentity.deviceId).readCurrentBattery(context)
@@ -247,7 +249,8 @@ fun QrScannerScreen(
                         pinnedCertSha256 = resolvedFp,
                         sharedBleSecret = derived.sharedBleSecret,
                         bluetoothSessionKey = derived.sessionKey,
-                        pairToken = parsed.pairToken
+                        pairToken = parsed.pairToken,
+                        btAddress = parsed.btAddress
                     )
                     BridgeActivityHub.onStartPairingExchange?.invoke(candidate, commit, parsed.lanHost, parsed.tcpPort)
                 }

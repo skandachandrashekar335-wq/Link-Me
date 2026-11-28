@@ -1,4 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="accessibility_service_description">Allows Link-Me Companion Add-on to execute cursor clicks, trackpad swipes, and keyboard input forwarded from your paired Mac over signature-verified IPC.</string>
-</resources>

@@ -226,6 +226,7 @@ final class BridgeDashboardViewModel: ObservableObject {
     lazy var telemetryFeature = TelemetryFeature(transport: transportManager)
     lazy var continuityController = MacContinuityController(transport: transportManager)
     let screenMirrorManager = ScreenMirrorManager()
+    let rfcommTransport = MacBtRfcommTransport()
 
     private var localDeviceId: String = "11111111-1111-4111-8111-111111111111"
     private var localIdentity: DeviceIdentity?
@@ -369,6 +370,29 @@ final class BridgeDashboardViewModel: ObservableObject {
         blePeripheralManager = peripheral
         peripheral.start(localName: preferences.normalizedAlias)
 
+        rfcommTransport.onDiagnostic = { [weak self] diag in
+            Task { @MainActor [weak self] in
+                self?.recordWireEvent(diag)
+            }
+        }
+        rfcommTransport.onConnected = { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.isBluetoothConnected = true
+                await self.clipboardManager.setPeerReachable(true)
+            }
+        }
+        rfcommTransport.onDisconnected = { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.isBluetoothConnected = (self.peripheralDiagnostics.subscribedCentralsCount > 0) || (self.bleCentralManager?.isConnected == true)
+            }
+        }
+        rfcommTransport.onFrameReceived = { [weak self] frame in
+            Task { await self?.handleInboundFrame(frame) }
+        }
+        _ = rfcommTransport.startListening()
+
         if let firstPeer = (try? trustStore.allPeers())?.first {
             peerPaired = true
             peerName = firstPeer.deviceName
@@ -384,7 +408,7 @@ final class BridgeDashboardViewModel: ObservableObject {
             MacNotificationManager.makeNotificationCategory()
         ])
 
-        Task { [weak self] in
+        Task { [weak self, weak central, weak peripheral] in
             guard let self else { return }
             await self.applyPreferencesSnapshot(self.preferences.snapshot)
             await self.clipboardManager.setPeerReachable(self.peerPaired)
@@ -411,8 +435,10 @@ final class BridgeDashboardViewModel: ObservableObject {
             self.startTelemetryTimer()
 
             await self.transportManager.configureTransportHooks(
-                bleSender: { [weak central, weak peripheral] frame in
-                    if central?.isConnected == true {
+                bleSender: { [weak self, weak central, weak peripheral] frame in
+                    if let self, self.rfcommTransport.isConnected {
+                        _ = self.rfcommTransport.sendFrame(frame)
+                    } else if central?.isConnected == true {
                         central?.sendControlFrame(frame)
                     } else {
                         peripheral?.sendFrame(frame)
@@ -610,6 +636,9 @@ final class BridgeDashboardViewModel: ObservableObject {
                 payload: ackData
               ) else {
             return
+        }
+        if rfcommTransport.isConnected {
+            _ = rfcommTransport.sendFrame(ackFrame)
         }
         blePeripheralManager?.sendFrame(ackFrame)
         bleCentralManager?.sendControlFrame(ackFrame)

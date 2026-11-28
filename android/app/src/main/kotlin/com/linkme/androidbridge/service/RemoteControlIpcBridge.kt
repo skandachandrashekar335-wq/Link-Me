@@ -34,7 +34,6 @@ object RemoteInputCoordinateMapper {
  */
 object RemoteControlIpcBridge {
     const val ACTION_REMOTE_INPUT_IPC = "com.linkme.androidbridge.ACTION_REMOTE_INPUT_IPC"
-    private const val ADDON_ACCESSIBILITY_CLASS = "com.linkme.androidbridge.notifyaddon.RemoteControlAccessibilityService"
     private const val MAX_JSON_BYTES = 256 * 1024
 
     private val json = Json { ignoreUnknownKeys = true }

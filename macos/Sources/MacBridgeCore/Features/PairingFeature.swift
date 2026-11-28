@@ -58,7 +58,8 @@ public actor PairingFeature {
             tcpPort: effectivePort,
             bleServiceUuid: PairingUriPayload.defaultBleServiceUuid,
             lanHost: Self.localLanIPv4Address(),
-            deviceName: deviceName ?? Host.current().localizedName
+            deviceName: deviceName ?? Host.current().localizedName,
+            btAddress: MacBtRfcommTransport.hostBluetoothAddress()
         )
         let expiresAt = session.createdAt.addingTimeInterval(PairingCrypto.sessionTtlSeconds)
         return (uri, expiresAt)

@@ -1087,7 +1087,7 @@ private fun SettingsTabContent(
             SettingsSwitchRow(
                 pal,
                 "Notification Mirroring",
-                if (addonStatus == NotificationAddonStatus.ACTIVE) "Forward Android alerts to macOS" else "Tap to configure Notify Add-on",
+                if (addonStatus == NotificationAddonStatus.ACTIVE) "Forward Android alerts to macOS" else "Tap to enable Notification Access",
                 notificationMirrorEnabled && addonStatus == NotificationAddonStatus.ACTIVE
             ) { want ->
                 if (want && addonStatus != NotificationAddonStatus.ACTIVE) {
@@ -1220,7 +1220,7 @@ private fun SettingsTabContent(
 
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = onNotificationAccessClick, modifier = Modifier.weight(1f), shape = CircleShape) {
-                    Text("Notify Add-on", fontSize = 11.sp, color = pal.onSurface)
+                    Text("Notification Access", fontSize = 11.sp, color = pal.onSurface)
                 }
                 if (isPaired) {
                     Button(

@@ -86,15 +86,14 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Assemble Release APKs (Core + Optional Notify Add-on)
+      - name: Assemble Release APK (Single Core APK)
         working-directory: android
         run: |
-          ./gradlew :app:testDebugUnitTest :notify-addon:testDebugUnitTest :app:assembleRelease :notify-addon:assembleRelease --no-daemon
+          ./gradlew :app:testDebugUnitTest :app:assembleRelease --no-daemon
           MERGED_APP_MANIFEST="$(find app/build/intermediates/merged_manifests -path '*release*' -name 'AndroidManifest.xml' | head -n 1)"
           test -n "$MERGED_APP_MANIFEST"
           for perm in \
             android.permission.BIND_ACCESSIBILITY_SERVICE \
-            android.permission.BIND_NOTIFICATION_LISTENER_SERVICE \
             android.permission.BIND_DEVICE_ADMIN \
             android.permission.REQUEST_INSTALL_PACKAGES \
             android.permission.SYSTEM_ALERT_WINDOW; do
@@ -104,12 +103,11 @@ jobs:
             fi
           done
 
-      - name: Align & Sign Release APKs (v1/v2/v3 with shared release key)
+      - name: Align & Sign Release APK (v1/v2/v3 with release key)
         run: |
           TAG_NAME="${{ github.event.inputs.tag || github.ref_name }}"
           mkdir -p release-out
           RAW_CORE_APK="$(find android/app/build/outputs/apk/release -name '*.apk' | head -n 1)"
-          RAW_ADDON_APK="$(find android/notify-addon/build/outputs/apk/release -name '*.apk' | head -n 1)"
 
           BUILD_TOOLS_DIR="$(find "${ANDROID_HOME}/build-tools" -maxdepth 1 -mindepth 1 | sort -V | tail -n 1)"
           ZIPALIGN="${BUILD_TOOLS_DIR}/zipalign"
@@ -150,18 +148,13 @@ jobs:
           }
 
           sign_apk "$RAW_CORE_APK" "AndroidBridge-${TAG_NAME}.apk"
-          sign_apk "$RAW_ADDON_APK" "AndroidBridge-NotifyAddon-${TAG_NAME}.apk"
 
           "$AAPT2" dump xmltree "release-out/AndroidBridge-${TAG_NAME}.apk" --file AndroidManifest.xml > /tmp/core-apk-manifest.txt
           "$AAPT2" dump permissions "release-out/AndroidBridge-${TAG_NAME}.apk" > /tmp/core-apk-perms.txt
-          "$AAPT2" dump permissions "release-out/AndroidBridge-NotifyAddon-${TAG_NAME}.apk" > /tmp/addon-apk-perms.txt
           echo "=== Core APK Permissions ==="
           cat /tmp/core-apk-perms.txt
-          echo "=== NotifyAddon APK Permissions ==="
-          cat /tmp/addon-apk-perms.txt
           for perm in \
             android.permission.BIND_ACCESSIBILITY_SERVICE \
-            android.permission.BIND_NOTIFICATION_LISTENER_SERVICE \
             android.permission.BIND_DEVICE_ADMIN \
             android.permission.REQUEST_INSTALL_PACKAGES \
             android.permission.SYSTEM_ALERT_WINDOW; do
@@ -170,19 +163,9 @@ jobs:
               exit 1
             fi
           done
-          for perm in \
-            android.permission.BIND_ACCESSIBILITY_SERVICE \
-            android.permission.BIND_DEVICE_ADMIN \
-            android.permission.REQUEST_INSTALL_PACKAGES \
-            android.permission.SYSTEM_ALERT_WINDOW; do
-            if grep -q "$perm" /tmp/addon-apk-perms.txt; then
-              echo "ERROR: Restricted permission $perm leaked into signed NotifyAddon APK!"
-              exit 1
-            fi
-          done
-          echo "Verified both signed APKs (Core + NotifyAddon) free of Accessibility/Admin/Alert/Install blocks."
+          echo "Verified signed AndroidBridge APK free of Accessibility/Admin/Alert/Install blocks."
 
-          (cd release-out && sha256sum "AndroidBridge-${TAG_NAME}.apk" "AndroidBridge-NotifyAddon-${TAG_NAME}.apk" > SHA256SUMS.android.txt)
+          (cd release-out && sha256sum "AndroidBridge-${TAG_NAME}.apk" > SHA256SUMS.android.txt)
           ls -lh release-out/
 
       - uses: actions/upload-artifact@v4

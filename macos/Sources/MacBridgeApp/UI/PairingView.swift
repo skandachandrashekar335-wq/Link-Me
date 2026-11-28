@@ -40,7 +40,7 @@ struct PairingView: View {
                     }
             }
 
-            Text("EXPIRES IN \(formattedCountdown) • BLE + LAN")
+            Text("EXPIRES IN \(formattedCountdown) • BLUETOOTH RFCOMM + LAN")
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(pal.secondaryText)
 

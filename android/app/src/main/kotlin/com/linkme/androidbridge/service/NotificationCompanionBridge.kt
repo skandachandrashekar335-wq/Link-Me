@@ -45,20 +45,7 @@ object NotificationCompanionBridge {
             NotificationManagerCompat.getEnabledListenerPackages(context)
         }.getOrDefault(emptySet())
 
-        if (BridgeNotificationListener.activeInstance != null || CORE_PACKAGE_NAME in enabledPackages) {
-            return NotificationAddonStatus.ACTIVE
-        }
-
-        val addonInstalled = runCatching {
-            context.packageManager.getPackageInfo(ADDON_PACKAGE_NAME, 0)
-            true
-        }.getOrDefault(false)
-
-        if (!addonInstalled) {
-            return NotificationAddonStatus.NOT_INSTALLED
-        }
-
-        return if (ADDON_PACKAGE_NAME in enabledPackages) {
+        return if (BridgeNotificationListener.activeInstance != null || context.packageName in enabledPackages) {
             NotificationAddonStatus.ACTIVE
         } else {
             NotificationAddonStatus.INSTALLED_NEEDS_PERMISSION
@@ -66,7 +53,7 @@ object NotificationCompanionBridge {
     }
 
     fun dispatchIncomingEvent(event: NotificationEventPayload) {
-        if (event.packageName == CORE_PACKAGE_NAME || event.packageName == ADDON_PACKAGE_NAME) {
+        if (event.packageName == contextPackageOrCore(event.packageName)) {
             return
         }
         val current = _recentFeed.value.toMutableList()
@@ -82,19 +69,11 @@ object NotificationCompanionBridge {
     }
 
     fun dispatchDeviceCommand(context: Context, command: DeviceCommandPayload): Boolean {
-        if (BridgeNotificationListener.activeInstance?.handleDeviceCommand(command) == true) {
-            return true
-        }
-        if (inspectAddonStatus(context) == NotificationAddonStatus.NOT_INSTALLED) {
-            return false
-        }
-        val payloadJson = encodeDeviceCommandJson(command)
-        val intent = Intent(ACTION_DEVICE_COMMAND_IPC).apply {
-            setPackage(ADDON_PACKAGE_NAME)
-            putExtra(EXTRA_PAYLOAD_JSON, payloadJson)
-        }
-        context.sendBroadcast(intent, PERMISSION_MIRROR_IPC)
-        return true
+        return BridgeNotificationListener.activeInstance?.handleDeviceCommand(command) ?: false
+    }
+
+    private fun contextPackageOrCore(pkg: String): String {
+        return if (pkg == CORE_PACKAGE_NAME) CORE_PACKAGE_NAME else ""
     }
 
     fun encodeNotificationEventJson(payload: NotificationEventPayload): String {

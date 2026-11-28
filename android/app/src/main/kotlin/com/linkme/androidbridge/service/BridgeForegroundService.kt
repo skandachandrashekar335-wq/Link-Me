@@ -94,6 +94,7 @@ class BridgeForegroundService : Service() {
     @Volatile private var preferencesStore: BridgePreferencesStore? = null
     @Volatile private var blePeripheralManager: BlePeripheralManager? = null
     @Volatile private var bleGattClient: BleGattClient? = null
+    @Volatile private var rfcommTransport: com.linkme.androidbridge.core.transport.AndroidBtRfcommTransport? = null
     @Volatile private var nsdDiscoveryManager: NsdDiscoveryManager? = null
     @Volatile private var wifiTlsServer: WifiTlsServer? = null
     @Volatile private var wifiTlsClient: WifiTlsClient? = null
@@ -176,6 +177,8 @@ class BridgeForegroundService : Service() {
 
         runCatching { stopWifiTransport() }
         runCatching { nsdDiscoveryManager?.unregister() }
+        runCatching { rfcommTransport?.stop() }
+        rfcommTransport = null
         runCatching { bleGattClient?.shutdown() }
         runCatching { blePeripheralManager?.shutdown() }
         runCatching { transportManager?.shutdown() }
@@ -212,9 +215,13 @@ class BridgeForegroundService : Service() {
 
             val transport = TransportManager(
                 bleSender = { frame ->
-                    val clientSent = bleGattClient?.takeIf { it.isConnected }?.sendFrame(frame) == true
-                    if (!clientSent) {
-                        blePeripheralManager?.sendControlFrame(frame)
+                    if (rfcommTransport?.isConnected?.value == true) {
+                        rfcommTransport?.sendFrame(frame)
+                    } else {
+                        val clientSent = bleGattClient?.takeIf { it.isConnected }?.sendFrame(frame) == true
+                        if (!clientSent) {
+                            blePeripheralManager?.sendControlFrame(frame)
+                        }
                     }
                 },
                 wifiOpener = { startOnDemandWifiServer() },
@@ -392,6 +399,27 @@ class BridgeForegroundService : Service() {
                 }
             )
             bleGattClient = gattClient
+
+            val rfcomm = com.linkme.androidbridge.core.transport.AndroidBtRfcommTransport(serviceScope)
+            rfcommTransport = rfcomm
+            rfcomm.startListening()
+            rfcomm.onFrameReceived = { frame ->
+                serviceScope.launch { runCatching { routeInboundFrame(frame) } }
+            }
+            rfcomm.onConnected = {
+                BridgeActivityHub.updateConnectionState(bleConnected = true)
+                if (store.allPeers().isNotEmpty()) {
+                    serviceScope.launch { emitImmediateTelemetry() }
+                }
+            }
+            rfcomm.onDisconnected = {
+                BridgeActivityHub.updateConnectionState(
+                    bleConnected = peripheral.isClientConnected || gattClient.isConnected
+                )
+            }
+            rfcomm.onDiagnostic = { event ->
+                BridgeActivityHub.appendWireEvent(event)
+            }
             serviceScope.launch {
                 gattClient.diagnostics.collect { diag ->
                     BridgeActivityHub.updateRadioDiagnostics(
@@ -553,6 +581,25 @@ class BridgeForegroundService : Service() {
                 serviceScope.launch {
                     BridgeActivityHub.beginPairingCommit(candidate)
                     BridgeActivityHub.pendingAutoCommit = commit
+                    val macBt = candidate.btAddress
+                    if (!macBt.isNullOrBlank()) {
+                        BridgeActivityHub.updatePairingTrace(
+                            step = 2,
+                            statusText = "Connecting via Bluetooth Classic RFCOMM...",
+                            errorMessage = null
+                        )
+                        val connected = rfcomm.connect(macBt)
+                        if (connected) {
+                            BridgeActivityHub.updatePairingTrace(
+                                step = 3,
+                                statusText = "RFCOMM Connected — Transmitting PAIR_COMMIT...",
+                                errorMessage = null
+                            )
+                            val payloadBytes = json.encodeToString(commit).toByteArray(Charsets.UTF_8)
+                            val commitFrame = WireFrame(WireMessageType.PAIR_COMMIT, 2L, payloadBytes)
+                            rfcomm.sendFrame(commitFrame)
+                        }
+                    }
                     peripheral.startPairingAdvertisement(candidate.pairToken)
                     launchLanCommit(commit, lanHost, tcpPort)
                     schedulePairingTimeout()
@@ -565,6 +612,9 @@ class BridgeForegroundService : Service() {
                     val commitFrame = WireFrame(WireMessageType.PAIR_COMMIT, 2L, payloadBytes)
                     BridgeActivityHub.pendingAutoCommit = commit
                     val pairToken = commit.pairToken
+                    if (rfcomm.isConnected.value) {
+                        rfcomm.sendFrame(commitFrame)
+                    }
                     if (peripheral.isClientConnected) {
                         BridgeActivityHub.updatePairingTrace(
                             step = 2,

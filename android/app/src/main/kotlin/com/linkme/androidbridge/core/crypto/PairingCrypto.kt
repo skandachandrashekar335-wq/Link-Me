@@ -20,7 +20,8 @@ data class PairingUriPayload(
     val bleServiceUuid: String? = DEFAULT_BLE_SERVICE_UUID,
     val lanHost: String? = null,
     val deviceName: String? = null,
-    val pairToken: String = nonceHex.take(16).lowercase()
+    val pairToken: String = nonceHex.take(16).lowercase(),
+    val btAddress: String? = null
 ) {
     val hasFullCertFingerprint: Boolean
         get() = certSha256Prefix.length == 64 && certSha256Prefix.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
@@ -44,6 +45,9 @@ data class PairingUriPayload(
             }
             if (!deviceName.isNullOrBlank()) {
                 append("&name=").append(encodeParam(deviceName))
+            }
+            if (!btAddress.isNullOrBlank()) {
+                append("&bt=").append(encodeParam(btAddress))
             }
         }
 
@@ -74,7 +78,7 @@ data class PairingUriPayload(
                 key to value
             }
             val version = query["v"]?.toIntOrNull() ?: error("Missing v")
-            require(version == 1 || version == 2) { "Unsupported pairing version" }
+            require(version == 1 || version == 2 || version == 3) { "Unsupported pairing version" }
             val deviceId = query["id"]?.takeIf { it.isNotEmpty() } ?: error("Missing id")
             val pub = (query["pk"] ?: query["pub"])?.takeIf { it.isNotEmpty() } ?: error("Missing pub")
             val fp = query["fp"]?.takeIf { it.length >= 16 }?.lowercase() ?: error("Missing fp")
@@ -83,6 +87,7 @@ data class PairingUriPayload(
                 ?: if (version >= 2) 0 else error("Invalid port")
             val bleRaw = query["ble"]
             val resolvedBle = if (bleRaw == null || bleRaw == "1" || bleRaw.isBlank()) DEFAULT_BLE_SERVICE_UUID else bleRaw
+            val btAddress = query["bt"]?.takeIf { it.isNotBlank() }
             return PairingUriPayload(
                 version = version,
                 deviceId = deviceId,
@@ -93,7 +98,8 @@ data class PairingUriPayload(
                 bleServiceUuid = resolvedBle,
                 lanHost = (query["ip"] ?: query["host"])?.takeIf { it.isNotBlank() },
                 deviceName = query["name"]?.takeIf { it.isNotBlank() },
-                pairToken = query["tok"]?.takeIf { it.isNotBlank() } ?: nonce.take(16).lowercase()
+                pairToken = query["tok"]?.takeIf { it.isNotBlank() } ?: nonce.take(16).lowercase(),
+                btAddress = btAddress
             )
         }
     }
@@ -150,10 +156,11 @@ class PairingCrypto(
         tcpPort: Int,
         bleServiceUuid: String? = PairingUriPayload.DEFAULT_BLE_SERVICE_UUID,
         lanHost: String? = null,
-        deviceName: String? = null
+        deviceName: String? = null,
+        btAddress: String? = null
     ): PairingUriPayload =
         PairingUriPayload(
-            version = 2,
+            version = 3,
             deviceId = deviceId,
             publicKeyBase64Url = publicKeyBase64Url,
             certSha256Prefix = certSha256Hex.lowercase(),
@@ -162,7 +169,8 @@ class PairingCrypto(
             bleServiceUuid = bleServiceUuid,
             lanHost = lanHost,
             deviceName = deviceName,
-            pairToken = pairToken
+            pairToken = pairToken,
+            btAddress = btAddress
         )
 
     fun deriveSecrets(
